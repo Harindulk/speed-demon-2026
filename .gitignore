@@ -1,2 +1,10 @@
 .out/
 data/
+
+# local only, never in the public repo
+_spec/
+.data/
+notes/
+CLAUDE.md
+target/
+.DS_Store
