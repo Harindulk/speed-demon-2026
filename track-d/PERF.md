@@ -57,3 +57,4 @@ Why each step:
 22. Writing `label[order[k]] = k` is 1.7M random writes on one thread. Splitting it across threads with atomic stores saved about 3 ms of BFS time, too small to show in the total, so it was not worth 12 more lines.
 23. A check that the hash map from step 8 is not costing time now that the heap is faster: dense arrays with a touched-list reset gave the same query time, so the map keeps its ~170 MB memory saving at no time cost.
 | 21b | Board check of steps 19-20: run-c0e7c2523de5 at f885f9b, 0.2767 s / 244.8 MB / S 441 / 58.5 pts, against 0.4046 s / 210.5 MB / 55.4 pts for fc1e03f | run-c0e7c2523de5 | 0.2767 | 244.8 | kept: 32% faster on the box for +34 MB and +39 lines, +3.2 points |
+| 21 | Drop the input-id CSR and the BFS order before the transpose (shadowing kept them alive); size the transpose buckets exactly from a count pass | | harness best-of-5 181 → 174 ms (same) | harness 311 → 252 MB (heap ~219 → ~160) | |

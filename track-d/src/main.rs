@@ -121,7 +121,14 @@ impl Csr {
             let handles: Vec<_> = (0..owners)
                 .map(|t| {
                     s.spawn(move || {
-                        let mut buckets = vec![Vec::new(); owners];
+                        // Count first so the buckets are exact: growing them
+                        // by doubling would hold up to twice their size.
+                        let rows = &self.edges[self.first[t * block] as usize..self.first[n.min((t + 1) * block)] as usize];
+                        let mut sizes = vec![0usize; owners];
+                        for &(v, _) in rows {
+                            sizes[v as usize / block] += 1;
+                        }
+                        let mut buckets: Vec<Vec<(u32, u32, u32)>> = sizes.iter().map(|&c| Vec::with_capacity(c)).collect();
                         for u in t * block..n.min((t + 1) * block) {
                             for &(v, w) in self.neighbours(u as u32) {
                                 buckets[v as usize / block].push((v, u as u32, w));
@@ -250,10 +257,12 @@ fn read_graph(b: &[u8], threads: usize) -> (Csr, Csr, Vec<u32>) {
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
     assert_eq!(parts.iter().flatten().map(Vec::len).sum::<usize>(), m, "edge count");
-    let fwd = Csr::from_parts(n, block, &parts);
+    let g = Csr::from_parts(n, block, &parts);
     drop(parts);
-    let (order, label) = bfs_labels(&fwd, threads);
-    let fwd = fwd.relabel(&order, &label, threads);
+    let (order, label) = bfs_labels(&g, threads);
+    let fwd = g.relabel(&order, &label, threads);
+    // Shadowing would keep the input-id graph alive through the transpose.
+    drop((g, order));
     let rev = fwd.transpose(block);
     (fwd, rev, label)
 }
