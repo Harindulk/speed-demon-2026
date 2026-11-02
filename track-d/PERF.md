@@ -16,17 +16,20 @@ Local numbers come from an Apple M5 running the official harness in Colima (8 vC
 | 7 | Tried: CSR build with atomic counters on every core. Reverted | | local 0.30-0.33 vs 0.29-0.33 | | |
 | 8 | Per-search hash map for distances instead of dense per-thread arrays (committed 3ce2b62) | run-825573299ad2 (box: T 0.507, M 204.6, S 332, 53.7 pts) | local 0.35-0.38 vs 0.31 | local 297 vs 415 | |
 | 9 | Tried: key and distance interleaved in one hash slot. Reverted | | queries ~200 ms either way | | |
-| 10 | Multiplicative hash instead of the low id bits | | queries 165-185 → 125-140 ms | | |
-| 11 | Check meetings only when a label improves; never push a node at >= best | | queries best-of-3 130 → 122 ms | | |
-| 12 | BFS relabelling from one root per thread (atomic claims), regions laid out in turn | | build+BFS ~140 → ~75 ms; total best 330 → 251 ms | | |
+| 10 | Multiplicative hash instead of the low id bits | run-23a4b3d65854 (with 14) | queries 165-185 → 125-140 ms | | |
+| 11 | Check meetings only when a label improves; never push a node at >= best | run-23a4b3d65854 (with 14) | queries best-of-3 130 → 122 ms | | |
+| 12 | BFS relabelling from one root per thread (atomic claims), regions laid out in turn | run-23a4b3d65854 (with 14) | build+BFS ~140 → ~75 ms; total best 330 → 251 ms | | |
 | 13 | Tried: CSR build split by tail-id range across threads (no atomics). Reverted | | build+BFS 102-131 vs 133-247 ms, no win | | |
-| 14 | Radix heap instead of `BinaryHeap` (committed 9df7c6d with steps 10-12) | | queries best-of-6 115 → 79 ms; total 244 → 215 ms | | |
+| 14 | Radix heap instead of `BinaryHeap` (committed 9df7c6d with steps 10-12) | run-23a4b3d65854 (box, steps 10-14 together: T 0.507 → 0.405 s, M 210.5, S 402, 53.7 → 55.4 pts) | queries best-of-6 115 → 79 ms; total 244 → 215 ms | | |
 | 15 | Tried: range-partitioned build for the forward CSR only, reverse build kept serial. Reverted | | build+BFS best 93 → 142 ms, slower | | |
 | 16 | Tried: `MAP_POPULATE` on the input mapping. Reverted | | parse 20-26 → 33-37 ms, total no better | | |
 | 17 | Tried: parallel degree gather in the relabel. Reverted | | relabel 38-45 vs 43-54 ms, no win under load | | |
 | 18 | Tried: no reverse CSR in input ids; reverse = transpose of the relabelled forward CSR. Reverted | | harness T 0.238 → 0.268 s, M 303 → 258 MB | | |
 | 19 | Owner-bucketed parallel CSR build: parse threads bucket edges by tail owner, each owner builds its rows; reverse CSR = bucketed transpose of the relabelled forward CSR | | forward build 65 → 23 ms; harness T 0.208 → 0.178 s, M 303 → 372 MB | | |
 | 20 | Owners write straight into one shared CSR (split slices) instead of per-owner blocks concatenated after | | harness T 0.208 → 0.173 s (best of 2x5 vs 2x5), M 303 → 326 MB | | |
+| 21 | Tried: SWAR parse of up to 7 digits per 8-byte word. Reverted | | parse 23-28 ms either way | | |
+| 22 | Tried: parallel inversion of the BFS order into labels. Reverted | | BFS 23-26 → 19-22 ms, total best 166 vs 178 ms, not a clear win | | |
+| 23 | Tried: dense per-thread distance arrays again, now with the radix heap. Reverted | | queries 75-87 vs 76-90 ms, no faster | | |
 
 Why each step:
 
@@ -50,3 +53,6 @@ Why each step:
 18. Building the reverse graph from the relabelled forward graph drops one 47 MB CSR and frees the parsed edges sooner (local M -15%), but the transpose lands on the critical path instead of overlapping the BFS (T +12%). Under the K formula (time ^0.5, memory ^0.2) that is a wash locally, and the box's slower serial speed tips it to a loss, so it was not kept.
 19. The input edges are shuffled, so no thread can own a range of tails without first grouping the edges. Each parse thread now drops each edge into one bucket per owner as it parses, and each owner counts and places only its own edges into rows that fit in its cache: no atomics, no thread reads edges it does not own (unlike steps 13 and 15). The forward build fell from 65 to 23 ms. The reverse graph is the same build fed from the relabelled forward graph, so the separate reverse build in input ids and its relabel are gone.
 20. Step 19 built each owner's rows into its own vectors and then copied them into one CSR, an extra 40 MB alive at the peak. Counting first and then splitting one shared edge array between the owners removes the copy: memory back down to +8% over step 14 for 17% less time, a net gain under the K formula (time ^0.5, memory ^0.2).
+21. Parsing 92 MB took 23-28 ms on 8 threads, so the per-byte digit loop looked like the limit. A SWAR version (find the separator with one mask, combine digit pairs, quads and halves with three multiplies) passed every seed but did not change the parse time. The phase is bound by page faults and bucket writes, not digit conversion, so the simple loop stayed.
+22. Writing `label[order[k]] = k` is 1.7M random writes on one thread. Splitting it across threads with atomic stores saved about 3 ms of BFS time, too small to show in the total, so it was not worth 12 more lines.
+23. A check that the hash map from step 8 is not costing time now that the heap is faster: dense arrays with a touched-list reset gave the same query time, so the map keeps its ~170 MB memory saving at no time cost.
