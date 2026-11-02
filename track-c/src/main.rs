@@ -88,9 +88,8 @@ impl Names {
         Names { slots: zeros(SLOTS), seen: zeros(256 * SLOTS / 64) }
     }
 
-    /// Records the name with hash `h` (from `hash`) in `group`.
-    fn add(&self, group: u8, h: u64) {
-        let h = h | 1; // 0 marks an empty slot
+    fn add(&self, group: u8, name: &[u8]) {
+        let h = hash(name) | 1; // 0 marks an empty slot
         let mut i = (h >> 40) as usize % SLOTS;
         for _ in 0..SLOTS {
             // A plain load first: after warm-up almost every name is already in.
@@ -203,10 +202,6 @@ fn cents(b: &[u8], i: &mut usize) -> i64 {
 /// Aggregates the records in `b[start..end]`; both ends are record starts.
 fn parse(b: &[u8], mut i: usize, end: usize, group: &[u8], names: &Names) -> [Agg; 256] {
     let mut aggs = [Agg::new(); 256];
-    // Name lookups are random memory accesses; doing them in batches lets the
-    // CPU overlap their cache misses instead of waiting on each in turn.
-    let mut batch = [(0u8, 0u64); 32];
-    let mut pending = 0;
     while i < end {
         if b[i..].starts_with(BOM) {
             i += 3;
@@ -219,12 +214,7 @@ fn parse(b: &[u8], mut i: usize, end: usize, group: &[u8], names: &Names) -> [Ag
         i += (b.get(i) == Some(&b'\r')) as usize + 1; // CRLF or LF (or end of file)
 
         let g = *group.get(region).unwrap_or(&UNMATCHED);
-        batch[pending] = (g, hash(name));
-        pending += 1;
-        if pending == batch.len() {
-            batch.iter().for_each(|&(g, h)| names.add(g, h));
-            pending = 0;
-        }
+        names.add(g, name);
         let a = &mut aggs[g as usize];
         a.count += 1;
         a.id_sum += id;
@@ -234,7 +224,6 @@ fn parse(b: &[u8], mut i: usize, end: usize, group: &[u8], names: &Names) -> [Ag
         a.name_bytes += name_len;
         a.note_bytes += note_len;
     }
-    batch[..pending].iter().for_each(|&(g, h)| names.add(g, h));
     aggs
 }
 
