@@ -2,6 +2,19 @@
 
 Measured on 1 November 2026, before any optimisation. Every track folder still holds the unchanged Python reference. Each `track-*/PERF.md` logs the steps from here, with the live-board run ID for every one.
 
+## Board runs (scoring box, seed 1)
+
+Every push to `speed-demon` is measured once by the live board. Per-step detail and reasoning live in each `track-*/PERF.md`.
+
+| Commit | Track | Run ID | T (s) | M (MB) | S | Points | What changed |
+|---|---|---|---|---|---|---|---|
+| 3ce2b62 | A | run-df1f0f914040 | 0.0618 | 53.1 | 297 | 68.8 | First Rust version: mmap, 12-thread chunks, counting scatter, select_nth percentiles |
+| 3ce2b62 | C | run-d53c8620b124 | 0.0681 | 20.1 | 309 | 67.3 | First Rust version: mmap, quote-aware parallel split, dense regions, name bitsets |
+| 3ce2b62 | D | run-825573299ad2 | 0.5065 | 204.6 | 332 | 53.7 | First Rust version: CSR, BFS relabel, size-balanced bidirectional Dijkstra |
+| 3ce2b62 | B | run-802df1e33e90 | | | | | Not run: folder still held the reference (the board skips it) |
+
+Lesson from the first runs: local best-of-N times in Colima were close for A and C (0.08 and 0.07 s) but D ran 1.5x slower on the board (0.35 s local, 0.51 s board), and local memory, measured as container peak minus mapped input, missed 15-50 MB of heap the board counts. The leaders are at 0.014 s (A, C) and 0.072 s (D), so the gap is real, not a measuring error. From here every decision uses board numbers.
+
 ## Machines
 
 | | Scoring box (counts) | Local (for iteration only) |
