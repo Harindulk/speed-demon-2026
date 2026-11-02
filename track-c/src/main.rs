@@ -303,7 +303,10 @@ fn main() {
             .windows(2)
             .map(|w| {
                 let (lo, hi, group, names) = (w[0], w[1], &group, &names);
-                s.spawn(move || parse(b, lo, hi, group, names))
+                // Small stacks: a default 2 MB stack can be backed by one huge page
+                // per thread when the kernel has transparent huge pages on.
+                let worker = thread::Builder::new().stack_size(256 << 10);
+                worker.spawn_scoped(s, move || parse(b, lo, hi, group, names)).unwrap()
             })
             .collect();
         for part in parts {
