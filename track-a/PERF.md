@@ -15,6 +15,8 @@ Every step from the reference to your final version, each with the live-board ru
 | 8 | Line cuts: reuse the SWAR scan to skip the method, one-line `mmap` call, simpler hash (288 to 274 counted lines) | | | | |
 | 9 | Latency array zeroed via calloc (queued as fc1e03f) (`vec![0u32; n]` collected in place into atomics) | | | | |
 | 10 | Revert step 7 and step 8's branch-free hash after the board showed a 23% regression; keep the other line cuts and step 9 | | | | |
+| 11 | Open-addressing intern table (8,192 slots of local id + 1, full byte compare on a hit) replaces the `HashMap` and the `Hasher` impl | | | | |
+| 12 | Latency parsed by SWAR: the newline is found in one 8-byte word and up to seven digits fold with three multiply-adds; 8 or more digits (up to 4294967295) take the byte loop | | | | |
 | - | Tried, reverted: count-then-rescan (two passes, no per-line records) | | | | |
 | - | Tried, reverted: `madvise(MADV_POPULATE_READ)` per thread chunk | | | | |
 | - | Tried, reverted: work-stealing parse over 8x more pieces than threads | | | | |
@@ -44,3 +46,4 @@ Local notes (Apple M5 under Colima, 8 vCPUs, shared with three other builds, so 
 - Step 9: building 3.1M `AtomicU32`s one at a time zeroes and faults the 12.4 MB array serially before the scatter. Starting from `vec![0u32; n]` gives calloc'd pages, and the in-place collect into atomics reuses that allocation. The A/B over three rounds was 0.062/0.059, 0.062/0.061 and 0.063/0.062 s (old/new): small, but faster every time. Four seeds pass.
 - Why records stay 8 bytes: latency spans the full `u32` range (0 to 4294967295 per the spec), so a line needs 32 bits of latency plus hour, endpoint and the 5xx flag. One `u64` per line is already the minimum for a single pass.
 - Step 10: steps 7 and 8 together (commit 5d4ccc6, run-addbbb812832) took 0.0760 s against 0.0618 and 0.0616 s for a19998d on two identical runs: a real 23% regression that the local A/B never showed. Two hot-loop changes are suspects. First, the branch-free hash slices `bytes[..min(n, 8)]`, whose length the compiler can't see, so each of the two 8-byte loads per line may become a `memcpy` call. Second, the per-line write to the seen-hours flags. Both go back to their step 6 form. The SWAR method skip, the one-line `mmap` call and step 9 stay. Four seeds pass. Lesson: on this track, a hot-loop change counts only once the board has measured it.
+- Steps 11-12: SWAR latency parse and an open-addressing intern table. Warm parse phase 12.7 to 10.6 ms best-of-36 (-16%), medians 15.5 to 12.6 ms; local wall flat (62 to 60 ms) because Colima page faults dominate it. Four seeds pass with identical hashes.

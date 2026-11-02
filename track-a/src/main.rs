@@ -9,9 +9,7 @@
 //! 3. scatter: a counting sort places every latency in its group's slice;
 //! 4. report: threads select percentiles and format disjoint ranges of groups.
 
-use std::collections::HashMap;
 use std::fs::File;
-use std::hash::{BuildHasherDefault, Hasher};
 use std::io::Write;
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use std::thread;
@@ -24,31 +22,40 @@ fn pack(hour: usize, error: bool, endpoint: usize, latency: u32) -> u64 {
     (hour as u64) << 50 | (error as u64) << 49 | (endpoint as u64) << 32 | latency as u64
 }
 
-/// Hashes an endpoint by its first and last 8 bytes (plus the length, which `Hash` for
-/// slices writes first): two loads per line instead of a pass over every byte. Endpoints
-/// are trusted ASCII, so SipHash's DoS resistance buys nothing here.
-#[derive(Default)]
-struct FastHash(u64);
+/// Hashes an endpoint by its length and first and last eight bytes: two loads per line
+/// instead of a pass over every byte. Hits compare the full bytes, so a collision only
+/// costs a probe.
+fn hash(e: &[u8]) -> u64 {
+    let n = e.len();
+    let (head, tail) = if n >= 8 {
+        let load = |b: &[u8]| u64::from_le_bytes(b.try_into().unwrap());
+        (load(&e[..8]), load(&e[n - 8..]))
+    } else {
+        let mut w = [0u8; 8];
+        w[..n].copy_from_slice(e);
+        (u64::from_le_bytes(w), 0)
+    };
+    let h = ((head ^ n as u64).wrapping_mul(0x9e3779b97f4a7c15) ^ tail).wrapping_mul(0x9e3779b97f4a7c15);
+    h ^ h >> 29
+}
 
-impl Hasher for FastHash {
-    fn write(&mut self, bytes: &[u8]) {
-        let word = |b: &[u8]| {
-            let mut w = [0u8; 8];
-            w[..b.len()].copy_from_slice(b);
-            u64::from_le_bytes(w)
-        };
-        let n = bytes.len();
-        let (head, tail) = if n >= 8 {
-            (word(&bytes[..8]), word(&bytes[n - 8..]))
-        } else {
-            (word(bytes), 0)
-        };
-        for w in [head, tail] {
-            self.0 = (self.0 ^ w).wrapping_mul(0x9e3779b97f4a7c15);
+/// Open-addressing table of local endpoint ids (stored as id + 1, 0 = empty), sized so
+/// the catalogue's 1,842 endpoints fill under a quarter of it: one array index per line
+/// instead of a hash-map probe.
+const SLOTS: usize = 8192;
+
+fn intern<'a>(table: &mut [u32], endpoints: &mut Vec<&'a [u8]>, e: &'a [u8]) -> usize {
+    let mut i = hash(e) as usize & (SLOTS - 1);
+    loop {
+        match table[i] {
+            0 => {
+                table[i] = endpoints.len() as u32 + 1;
+                endpoints.push(e);
+                return endpoints.len() - 1;
+            }
+            id if endpoints[id as usize - 1] == e => return id as usize - 1,
+            _ => i = (i + 1) & (SLOTS - 1),
         }
-    }
-    fn finish(&self) -> u64 {
-        self.0 ^ self.0 >> 29
     }
 }
 
@@ -76,8 +83,34 @@ fn find_space(data: &[u8], mut from: usize) -> usize {
     from + data[from..].iter().position(|&b| b == b' ').unwrap()
 }
 
+/// Parses the decimal latency at `pos`; returns it and the index of the newline after it.
+/// Up to seven digits convert without a loop: the word is shifted so the digits sit in
+/// its top bytes, the rest is filled with '0', and three multiply-add steps fold eight
+/// digits into one number (SWAR). Longer values (the full u32 range) take the byte loop.
+fn parse_latency(data: &[u8], pos: usize) -> (u32, usize) {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const ZEROS: u64 = 0x3030_3030_3030_3030;
+    if let Some(word) = data.get(pos..pos + 8) {
+        let w = u64::from_le_bytes(word.try_into().unwrap());
+        let x = w ^ (ONES * b'\n' as u64);
+        let digits = ((x.wrapping_sub(ONES) & !x & (ONES << 7)).trailing_zeros() / 8) as usize;
+        if (1..8).contains(&digits) {
+            let v = (w << (64 - digits * 8) | ZEROS >> (digits * 8)) - ZEROS;
+            let v = (v * 10 + (v >> 8)) & 0x00ff_00ff_00ff_00ff;
+            let v = (v * 100 + (v >> 16)) & 0x0000_ffff_0000_ffff;
+            return ((v * 10000 + (v >> 32)) as u32, pos + digits);
+        }
+    }
+    let (mut latency, mut end) = (0u32, pos);
+    while data[end] != b'\n' {
+        latency = latency * 10 + (data[end] - b'0') as u32;
+        end += 1;
+    }
+    (latency, end)
+}
+
 fn parse_chunk(data: &[u8]) -> Chunk<'_> {
-    let mut ids: HashMap<&[u8], usize, BuildHasherDefault<FastHash>> = HashMap::default();
+    let mut table = vec![0u32; SLOTS];
     let mut chunk = Chunk {
         endpoints: Vec::new(),
         records: Vec::with_capacity(data.len() / 70),
@@ -92,18 +125,9 @@ fn parse_chunk(data: &[u8]) -> Chunk<'_> {
         let end = find_space(data, start + 1);
         let endpoint = &data[start..end];
         let error = data[end + 1] == b'5';
-        let mut latency = 0u32;
-        pos = end + 5;
-        while data[pos] != b'\n' {
-            latency = latency * 10 + (data[pos] - b'0') as u32;
-            pos += 1;
-        }
-        pos += 1;
-        let next_id = chunk.endpoints.len();
-        let id = *ids.entry(endpoint).or_insert_with(|| {
-            chunk.endpoints.push(endpoint);
-            next_id
-        });
+        let (latency, newline) = parse_latency(data, end + 5);
+        pos = newline + 1;
+        let id = intern(&mut table, &mut chunk.endpoints, endpoint);
         chunk.records.push(pack(hour, error, id, latency));
     }
     chunk
