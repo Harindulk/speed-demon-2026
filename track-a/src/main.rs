@@ -10,8 +10,8 @@
 //! 4. report: threads select percentiles and format disjoint ranges of groups.
 
 use std::collections::HashMap;
-use std::hash::{BuildHasherDefault, Hasher};
 use std::fs::File;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::io::Write;
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use std::thread;
@@ -38,8 +38,10 @@ impl Hasher for FastHash {
             u64::from_le_bytes(w)
         };
         let n = bytes.len();
-        let (head, tail) = if n >= 8 { (word(&bytes[..8]), word(&bytes[n - 8..])) } else { (word(bytes), 0) };
-        for w in [head, tail] {
+        for w in [
+            word(&bytes[..n.min(8)]),
+            word(&bytes[n.saturating_sub(8)..]),
+        ] {
             self.0 = (self.0 ^ w).wrapping_mul(0x9e3779b97f4a7c15);
         }
     }
@@ -51,6 +53,7 @@ impl Hasher for FastHash {
 struct Chunk<'a> {
     endpoints: Vec<&'a [u8]>,
     records: Vec<u64>,
+    seen_hours: Vec<bool>,
 }
 
 fn two_digits(b: &[u8]) -> usize {
@@ -74,17 +77,18 @@ fn find_space(data: &[u8], mut from: usize) -> usize {
 
 fn parse_chunk(data: &[u8]) -> Chunk<'_> {
     let mut ids: HashMap<&[u8], usize, BuildHasherDefault<FastHash>> = HashMap::default();
-    let mut chunk = Chunk { endpoints: Vec::new(), records: Vec::with_capacity(data.len() / 70) };
+    let mut chunk = Chunk {
+        endpoints: Vec::new(),
+        records: Vec::with_capacity(data.len() / 70),
+        seen_hours: vec![false; HOUR_KEYS],
+    };
     let mut pos = 0;
     while pos < data.len() {
         let ts = &data[pos..pos + 27];
-        let hour = (two_digits(&ts[5..7]) * 32 + two_digits(&ts[8..10])) * 24 + two_digits(&ts[11..13]);
+        let hour =
+            (two_digits(&ts[5..7]) * 32 + two_digits(&ts[8..10])) * 24 + two_digits(&ts[11..13]);
         // Skip "<ts> " and the method (3 to 7 bytes) to the endpoint.
-        let mut start = pos + 31;
-        while data[start] != b' ' {
-            start += 1;
-        }
-        start += 1;
+        let start = find_space(data, pos + 31) + 1;
         let end = find_space(data, start + 1);
         let endpoint = &data[start..end];
         let error = data[end + 1] == b'5';
@@ -100,6 +104,7 @@ fn parse_chunk(data: &[u8]) -> Chunk<'_> {
             chunk.endpoints.push(endpoint);
             next_id
         });
+        chunk.seen_hours[hour] = true;
         chunk.records.push(pack(hour, error, id, latency));
     }
     chunk
@@ -139,7 +144,8 @@ fn map_input(path: &str) -> std::io::Result<&'static [u8]> {
     }
     // SAFETY: a private read-only mapping of a file nobody writes during the run; it is
     // never unmapped, so the 'static slice stays valid. The fd may close after mmap.
-    let ptr = unsafe { mmap(std::ptr::null_mut(), len, PROT_READ, MAP_PRIVATE, file.as_raw_fd(), 0) };
+    let fd = file.as_raw_fd();
+    let ptr = unsafe { mmap(std::ptr::null_mut(), len, PROT_READ, MAP_PRIVATE, fd, 0) };
     if ptr as isize == -1 {
         return Ok(std::fs::read(path)?.leak());
     }
@@ -179,24 +185,24 @@ fn main() -> std::io::Result<()> {
 
     // Phase 1: parse.
     let mut chunks: Vec<Chunk> = thread::scope(|s| {
-        let handles: Vec<_> =
-            split_lines(data, threads).into_iter().map(|p| s.spawn(move || parse_chunk(p))).collect();
+        let handles: Vec<_> = split_lines(data, threads)
+            .into_iter()
+            .map(|p| s.spawn(move || parse_chunk(p)))
+            .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
     // Phase 2: rank endpoints bytewise and hours chronologically.
-    let mut names: Vec<&[u8]> = chunks.iter().flat_map(|c| c.endpoints.iter().copied()).collect();
+    let mut names: Vec<&[u8]> = chunks
+        .iter()
+        .flat_map(|c| c.endpoints.iter().copied())
+        .collect();
     names.sort_unstable();
     names.dedup();
     let mut hour_rank = vec![u32::MAX; HOUR_KEYS];
-    for c in &chunks {
-        for r in &c.records {
-            hour_rank[(r >> 50) as usize] = 0;
-        }
-    }
     let mut hours = Vec::new();
     for (key, rank) in hour_rank.iter_mut().enumerate() {
-        if *rank == 0 {
+        if chunks.iter().any(|c| c.seen_hours[key]) {
             *rank = hours.len() as u32;
             hours.push(key);
         }
@@ -211,8 +217,11 @@ fn main() -> std::io::Result<()> {
             .map(|c| {
                 let (names, hour_rank, errors) = (&names, &hour_rank, &errors);
                 s.spawn(move || {
-                    let rank: Vec<usize> =
-                        c.endpoints.iter().map(|e| names.binary_search(e).unwrap()).collect();
+                    let rank: Vec<usize> = c
+                        .endpoints
+                        .iter()
+                        .map(|e| names.binary_search(e).unwrap())
+                        .collect();
                     let mut counts = vec![0u32; groups];
                     for r in c.records.iter_mut() {
                         let hour = hour_rank[(*r >> 50) as usize] as usize;
@@ -298,8 +307,7 @@ fn main() -> std::io::Result<()> {
                     let count = values.len() as u64;
                     let errs = errors[g].load(Relaxed) as u64;
                     let [p50, p95, p99] = percentiles(values).map(u64::from);
-                    for n in [count, p50, p95, p99, errs, errs * 1_000_000 / count]
-                    {
+                    for n in [count, p50, p95, p99, errs, errs * 1_000_000 / count] {
                         out.push(b' ');
                         push_num(&mut out, n);
                     }

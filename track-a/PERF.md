@@ -10,7 +10,14 @@ Every step from the reference to your final version, each with the live-board ru
 | 3 | Shared atomic 5xx counters instead of one array per thread; write buffers straight to the file instead of concatenating | | | | |
 | 4 | Hash endpoints by first and last 8 bytes plus length | | | | |
 | 5 | SWAR (8 bytes at a time) search for the space that ends the endpoint | | | | |
-| 6 | Percentiles: select p50 first, then p95 in the top half, then p99 in the top 5% | | | | |
+| 6 | Percentiles: select p50 first, then p95 in the top half, then p99 in the top 5% | run-df1f0f914040 | 0.0618 | 53.1 | 68.8 |
+| 7 | Mark the hours seen while parsing instead of a serial pass over all 3.1M records | | | | |
+| 8 | Line cuts: reuse the SWAR scan to skip the method, one-line `mmap` call, simpler hash (288 to 274 counted lines) | | | | |
+| - | Tried, reverted: count-then-rescan (two passes, no per-line records) | | | | |
+| - | Tried, reverted: `madvise(MADV_POPULATE_READ)` per thread chunk | | | | |
+| - | Tried, reverted: work-stealing parse over 8x more pieces than threads | | | | |
+
+Steps 1 to 6 were first measured together on the board as run-df1f0f914040 (commit 3ce2b62): 0.0618 s, 53.1 MB, 297 lines, 68.8 points. The leader on A was at 0.014 s, 14 MB, 383 lines.
 
 Local notes (Apple M5 under Colima, 8 vCPUs, shared with three other builds, so noisy; only board numbers count):
 
@@ -25,3 +32,10 @@ Local notes (Apple M5 under Colima, 8 vCPUs, shared with three other builds, so 
 - Local M from the harness is 289 MB because Colima charges the mmap'd page cache to the run; on the board the input is pre-warmed, so expect ~50 MB (27 MB records, 12 MB latencies, 10 MB output).
 - `check.py` and `tools/verify.sh` can fail with `NotFound` on sub-second runs: `check.py` deletes and recreates `.out/track-a` between runs and Colima's virtiofs serves a stale directory. A fresh output folder per run passes every time; this is a local artefact, not a bug in the solution.
 - Stopped at 13:33 UTC: the host disk filled up (4 GB free on 460 GB) and Colima's containerd started returning I/O errors, so nothing more could be built or measured. Steps 5 and 6 were both verified on all four seeds before that.
+- Step 7: the rank phase walked every record once on one thread just to learn which hours occur. Each parse thread now sets a flag per hour as it goes, so the rank phase only merges 12 small arrays. Rank phase 2.0 ms to 0.9 ms (min of 10). The A/B wall time (best of 24) was flat: 0.060 s vs 0.059 s. Four seeds pass.
+- Step 8: S counts lines after rustfmt, so the file is now rustfmt-clean. Skipping the method with `find_space` replaces a byte loop. Binding the fd first keeps the `mmap` call on one line. The hash loads `bytes[..min(n, 8)]` and `bytes[n - min(n, 8)..]` with no branch. 288 to 274 counted lines. A/B wall times over three rounds: 0.059/0.061, 0.057/0.056, 0.055/0.056 s (old/new), so no change. Four seeds pass.
+- Board memory (53 MB) breaks down as 25 MB of packed per-line records, 12.4 MB latency array, 6.3 MB of per-thread group counts and ~10 MB of output buffers, with the 10 MB output file's page cache on top.
+- Reverted, count-then-rescan: pass 1 interns endpoints and counts lines per (endpoint, hour) cell; pass 2 parses the chunk again and writes each latency straight to its slot, so the 25 MB of records go away. Local harness M (after subtracting the 239 MB input that Colima charges) fell from 49 MB to 40 MB, because the peak moves to the report phase (latencies + output buffers + output page cache). But the wall time rose from 0.075 s to 0.093 s. With the score's weights (time ^0.5, memory ^0.2), that is about -2.3 points for time against +0.8 for memory, a net loss. The code is kept out of the repo.
+- Reverted, `MADV_POPULATE_READ` per chunk: an attempt to fault the mapping in bulk on each thread. The A/B was 0.054 s (old) vs 0.063 s (new), slower.
+- Reverted, work stealing: 8x more pieces than threads, claimed from an atomic counter, so faster cores take more. The A/B was flat (0.082/0.079, 0.068/0.070 s). The box's 12 threads are 6 identical P-cores with hyperthreading, so there is no slow core to balance against. Not worth 8 more lines.
+- To reach the leader's 14 MB, the per-line latencies can't be stored at all. That needs a multi-pass histogram selection that rescans the page-cached input, which is a redesign and not a tweak.
