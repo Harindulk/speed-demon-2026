@@ -12,7 +12,7 @@ Rust, standard library only, one file (`src/main.rs`).
 4. **No merge.** Chunks hold consecutive id ranges, so a query's answer is just the chunks' answers in order: counts and sums add, and the ten smallest ids are the first ten found walking the chunks. Posting lists are never concatenated or shared between threads.
 5. **Queries in parallel.** Workers take blocks of 256 queries from an atomic counter and answer each over every chunk.
    - `BOOL` runs strictly left to right on a running set that is a sorted list or, once a frequent term is OR-ed in, a bitset. AND/NOT against a frequent term test bits; against a rare term they merge, or binary-search when one side is 32x smaller; bitset-with-bitset is word-wise `&`, `&!`, `|`.
-   - `PHRASE` takes candidates from the shortest id list, intersects the other lists, filters by the bitset terms, then re-tokenizes each candidate document straight from the mapped bytes and streams its tokens through an 8-slot ring, stopping at the first match. 98% of phrases contain a rare anchor, so candidates are a handful per query and no positions are stored.
+   - `PHRASE`: while indexing, every adjacent pair of query terms that occurs in some phrase (about 45k pairs) is indexed exactly like a term. A phrase's candidates are the documents holding all of its pairs; for two-term phrases that is the answer. Longer phrases re-tokenize each candidate straight from the mapped bytes through an 8-slot ring and stop at the first match. No positions are stored.
 6. Results are written with one `write_all`.
 
 The only `unsafe` is the `mmap` call, declared with `extern "C"` so no crate is needed.

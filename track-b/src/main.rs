@@ -78,6 +78,9 @@ impl Terms {
     }
 
     fn insert(&mut self, word: &'static [u8]) -> u32 {
+        if self.words.len() * 2 >= self.slots.len() {
+            *self = self.resized(self.slots.len());
+        }
         let i = self.slot(word.iter().fold(0, |h, &c| hash_step(h, c)), word);
         if self.slots[i] == 0 {
             self.words.push(word);
@@ -86,11 +89,56 @@ impl Terms {
         self.slots[i] - 1
     }
 
-    /// The same ids in a table sized to the final term count, so lookups stay in L2.
-    fn compact(&self) -> Terms {
-        let mut t = Terms::new(self.words.len());
+    /// The same ids in a table with room for `capacity` terms at under half load.
+    fn resized(&self, capacity: usize) -> Terms {
+        let mut t = Terms::new(capacity);
         self.words.iter().for_each(|w| _ = t.insert(w));
         t
+    }
+}
+
+/// The adjacent term pairs of every phrase. A pair is indexed like a term, with id
+/// `first_id + n`, so a phrase's candidates are the documents holding all its pairs.
+struct Pairs {
+    slots: Vec<(u64, u32)>, // (key, id); key u64::MAX = empty
+    role: Vec<u8>,          // per term: 1 = first of some pair, 2 = second of some pair
+    first_id: u32,
+    count: u32,
+}
+
+impl Pairs {
+    fn new(queries: &[Query], first_id: u32) -> Pairs {
+        let phrases = queries.iter().filter_map(|q| if let Query::Phrase(ts) = q { Some(ts) } else { None });
+        let keys: Vec<u64> = phrases.flat_map(|ts| ts.windows(2).map(|w| (w[0] as u64) << 32 | w[1] as u64)).collect();
+        let size = (keys.len() * 2).next_power_of_two().max(16);
+        let mut p = Pairs { slots: vec![(u64::MAX, 0); size], role: vec![0; first_id as usize], first_id, count: 0 };
+        for key in keys {
+            p.role[(key >> 32) as usize] |= 1;
+            p.role[key as u32 as usize] |= 2;
+            let i = p.slot(key);
+            if p.slots[i].0 == u64::MAX {
+                p.slots[i] = (key, first_id + p.count);
+                p.count += 1;
+            }
+        }
+        p
+    }
+
+    fn slot(&self, key: u64) -> usize {
+        let mask = self.slots.len() - 1;
+        let mut i = (key.wrapping_mul(0x9E3779B97F4A7C15) >> 40) as usize & mask;
+        while self.slots[i].0 != u64::MAX && self.slots[i].0 != key {
+            i = (i + 1) & mask;
+        }
+        i
+    }
+
+    fn get(&self, a: u32, b: u32) -> Option<u32> {
+        if self.role[a as usize] & 1 == 0 || self.role[b as usize] & 2 == 0 {
+            return None;
+        }
+        let (key, id) = self.slots[self.slot((a as u64) << 32 | b as u64)];
+        (key != u64::MAX).then_some(id)
     }
 }
 
@@ -135,6 +183,22 @@ struct Chunk {
 const NONE: u32 = u32::MAX;
 
 impl Chunk {
+    /// Records that document `local` contains term (or pair) `t`.
+    fn add(&mut self, t: u32, local: u16, n_docs: usize) {
+        let (list, b) = (&mut self.postings[t as usize], self.bitset_of[t as usize]);
+        if b != NONE {
+            set(&mut self.bitsets[b as usize], local, true);
+        } else if list.last() != Some(&local) {
+            list.push(local);
+            if list.len() * 32 > n_docs {
+                let mut bits = vec![0u64; n_docs.div_ceil(64)];
+                std::mem::take(list).into_iter().for_each(|d| set(&mut bits, d, true));
+                self.bitset_of[t as usize] = self.bitsets.len() as u32;
+                self.bitsets.push(bits);
+            }
+        }
+    }
+
     /// The term's bitset, or an empty slice while it is rare.
     fn bits(&self, t: u32) -> &[u64] {
         self.bitsets.get(self.bitset_of[t as usize] as usize).map_or(&[], |b| b)
@@ -159,15 +223,15 @@ fn ids(bits: &[u64]) -> impl Iterator<Item = u16> + '_ {
     })
 }
 
-fn index_chunk(docs: &[u8], start: usize, end: usize, terms: &Terms) -> Chunk {
+fn index_chunk(docs: &[u8], start: usize, end: usize, terms: &Terms, pairs: &Pairs) -> Chunk {
     let n_docs = docs[start..end].iter().filter(|&&b| b == b'\n').count();
     assert!(n_docs <= 1 << 16, "a chunk holds at most 65,536 documents");
     let id_end = start + docs[start..end].iter().position(|&b| b == b'\t').unwrap_or(0);
     let first_doc: u32 = std::str::from_utf8(&docs[start..id_end]).unwrap().parse().unwrap_or(0);
     let mut c = Chunk {
         first_doc,
-        postings: vec![Vec::new(); terms.words.len()],
-        bitset_of: vec![NONE; terms.words.len()],
+        postings: vec![Vec::new(); (pairs.first_id + pairs.count) as usize],
+        bitset_of: vec![NONE; (pairs.first_id + pairs.count) as usize],
         bitsets: Vec::new(),
         ranges: Vec::with_capacity(n_docs),
     };
@@ -179,7 +243,7 @@ fn index_chunk(docs: &[u8], start: usize, end: usize, terms: &Terms) -> Chunk {
         let line_end = tab + docs[tab..].iter().position(|&b| b == b'\n').unwrap();
         let local = c.ranges.len() as u16;
         c.ranges.push((tab as u32 + 1, line_end as u32));
-        let (text, mut j) = (&docs[tab + 1..line_end], 0);
+        let (text, mut j, mut prev) = (&docs[tab + 1..line_end], 0, NONE);
         while j < text.len() {
             if LOWER[text[j] as usize] == 0 {
                 j += 1;
@@ -195,19 +259,16 @@ fn index_chunk(docs: &[u8], start: usize, end: usize, terms: &Terms) -> Chunk {
                 len += 1;
                 j += 1;
             }
-            let Some(t) = (len <= 32).then(|| terms.get(h, &buf[..len])).flatten() else { continue };
-            let (list, b) = (&mut c.postings[t as usize], c.bitset_of[t as usize]);
-            if b != NONE {
-                set(&mut c.bitsets[b as usize], local, true);
-            } else if list.last() != Some(&local) {
-                list.push(local);
-                if list.len() * 32 > n_docs {
-                    let mut bits = vec![0u64; n_docs.div_ceil(64)];
-                    std::mem::take(list).into_iter().for_each(|d| set(&mut bits, d, true));
-                    c.bitset_of[t as usize] = c.bitsets.len() as u32;
-                    c.bitsets.push(bits);
-                }
+            // A token that is not a query term breaks adjacency for the pairs.
+            let Some(t) = (len <= 32).then(|| terms.get(h, &buf[..len])).flatten() else {
+                prev = NONE;
+                continue;
+            };
+            c.add(t, local, n_docs);
+            if let Some(p) = (prev != NONE).then(|| pairs.get(prev, t)).flatten() {
+                c.add(p, local, n_docs);
             }
+            prev = t;
         }
         i = line_end + 1;
     }
@@ -339,17 +400,22 @@ fn run_bool(ops: &[(u8, u32)], c: &Chunk) -> Set {
     })
 }
 
-/// Candidates come from the shortest id list (bitset terms only filter them), then each
-/// candidate's text is checked for the exact token sequence.
-fn run_phrase(ts: &[u32], c: &Chunk, words: &[&[u8]], docs: &[u8]) -> Vec<u16> {
+/// Candidates are the documents holding every adjacent pair of the phrase: the shortest
+/// id list, intersected with the other lists and filtered by the bitset pairs. A two-term
+/// phrase is exactly its pair; longer ones re-check each candidate's text for the sequence.
+fn run_phrase(ts: &[u32], c: &Chunk, pairs: &Pairs, words: &[&[u8]], docs: &[u8]) -> Vec<u16> {
+    let ps: Vec<u32> = ts.windows(2).map(|w| pairs.get(w[0], w[1]).unwrap()).collect();
     let mut lists: Vec<&Vec<u16>> =
-        ts.iter().filter(|&&t| c.bits(t).is_empty()).map(|&t| &c.postings[t as usize]).collect();
+        ps.iter().filter(|&&p| c.bits(p).is_empty()).map(|&p| &c.postings[p as usize]).collect();
     lists.sort_by_key(|p| p.len());
     let mut candidates = match lists.first() {
         Some(p) => lists[1..].iter().fold(p.to_vec(), |r, p| intersect(&r, p)),
-        None => ids(c.bits(ts[0])).collect(),
+        None => ids(c.bits(ps[0])).collect(),
     };
-    candidates.retain(|&d| ts.iter().all(|&t| c.bits(t).is_empty() || has(c.bits(t), d)));
+    candidates.retain(|&d| ps.iter().all(|&p| c.bits(p).is_empty() || has(c.bits(p), d)));
+    if ts.len() == 2 {
+        return candidates;
+    }
     let phrase: Vec<&[u8]> = ts.iter().map(|&t| words[t as usize]).collect();
     candidates.retain(|&d| {
         let (start, end) = c.ranges[d as usize];
@@ -358,23 +424,22 @@ fn run_phrase(ts: &[u32], c: &Chunk, words: &[&[u8]], docs: &[u8]) -> Vec<u16> {
     candidates
 }
 
-fn answer(q: &Query, chunk: &Chunk, words: &[&[u8]], docs: &[u8]) -> Partial {
+fn answer(q: &Query, chunk: &Chunk, pairs: &Pairs, words: &[&[u8]], docs: &[u8]) -> Partial {
     match q {
         Query::Bool(ops) => match run_bool(ops, chunk) {
             Set::List(list) => Partial::new(chunk.first_doc, list.into_iter()),
             Set::Bits(bits) => Partial::new(chunk.first_doc, ids(&bits)),
         },
-        Query::Phrase(ts) => Partial::new(chunk.first_doc, run_phrase(ts, chunk, words, docs).into_iter()),
+        Query::Phrase(ts) => Partial::new(chunk.first_doc, run_phrase(ts, chunk, pairs, words, docs).into_iter()),
     }
 }
 
 fn main() {
     let docs = map("/data/docs.txt");
     let query_text = map("/data/queries.txt");
-    // A term takes at least two bytes of queries.txt, so the table never fills past half.
-    let mut terms = Terms::new(query_text.len() / 2);
+    let mut terms = Terms::new(1 << 12);
     let queries = parse_queries(query_text, &mut terms);
-    let terms = terms.compact();
+    let pairs = Pairs::new(&queries, terms.words.len() as u32);
     let threads = std::thread::available_parallelism().map_or(12, |n| n.get());
 
     // Chunk boundaries at line starts, so every document belongs to exactly one chunk.
@@ -392,7 +457,7 @@ fn main() {
     // is the chunks' answers in chunk order and no posting list is ever merged.
     let chunks: Vec<Chunk> = std::thread::scope(|s| {
         let handles: Vec<_> =
-            cuts.windows(2).map(|w| s.spawn(|| index_chunk(docs, w[0], w[1], &terms))).collect();
+            cuts.windows(2).map(|w| s.spawn(|| index_chunk(docs, w[0], w[1], &terms, &pairs))).collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
@@ -409,7 +474,7 @@ fn main() {
                 }
                 let mut out = String::new();
                 for q in &queries[b * BLOCK..queries.len().min((b + 1) * BLOCK)] {
-                    let parts: Vec<Partial> = chunks.iter().map(|c| answer(q, c, &terms.words, docs)).collect();
+                    let parts: Vec<Partial> = chunks.iter().map(|c| answer(q, c, &pairs, &terms.words, docs)).collect();
                     let (count, sum) = parts.iter().fold((0, 0), |(n, s), p| (n + p.count, s + p.sum));
                     write!(out, "{count} {sum}").unwrap();
                     let first = parts.iter().flat_map(|p| &p.first[..p.count.min(10) as usize]);
@@ -425,4 +490,6 @@ fn main() {
     blocks.sort_unstable_by_key(|b| b.0);
     let out: String = blocks.into_iter().map(|b| b.1).collect();
     File::create("/out/results.txt").and_then(|mut f| f.write_all(out.as_bytes())).expect("write /out/results.txt");
+    // Skip freeing ~1M posting lists one by one; the process is done.
+    std::process::exit(0);
 }
