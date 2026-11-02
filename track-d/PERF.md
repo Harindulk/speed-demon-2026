@@ -14,7 +14,13 @@ Local numbers come from an Apple M5 running the official harness in Colima (8 vC
 | 5 | Distance arrays start as zero pages (bitwise-inverted storage) | | local 0.73 | local 412 | |
 | 6 | Parallel row copies for the relabel; BFS overlapped with the reverse build | | local 0.67 contended, 0.29-0.31 quiet | local 415 | |
 | 7 | Tried: CSR build with atomic counters on every core. Reverted | | local 0.30-0.33 vs 0.29-0.33 | | |
-| 8 | Per-search hash map for distances instead of dense per-thread arrays | | local 0.35-0.38 vs 0.31 | local 297 vs 415 | |
+| 8 | Per-search hash map for distances instead of dense per-thread arrays (committed 3ce2b62) | run-825573299ad2 (box: T 0.507, M 204.6, S 332, 53.7 pts) | local 0.35-0.38 vs 0.31 | local 297 vs 415 | |
+| 9 | Tried: key and distance interleaved in one hash slot. Reverted | | queries ~200 ms either way | | |
+| 10 | Multiplicative hash instead of the low id bits | | queries 165-185 → 125-140 ms | | |
+| 11 | Check meetings only when a label improves; never push a node at >= best | | queries best-of-3 130 → 122 ms | | |
+| 12 | BFS relabelling from one root per thread (atomic claims), regions laid out in turn | | build+BFS ~140 → ~75 ms; total best 330 → 251 ms | | |
+| 13 | Tried: CSR build split by tail-id range across threads (no atomics). Reverted | | build+BFS 102-131 vs 133-247 ms, no win | | |
+| 14 | Radix heap instead of `BinaryHeap` | | queries best-of-6 115 → 79 ms; total 244 → 215 ms | | |
 
 Why each step:
 
@@ -26,3 +32,9 @@ Why each step:
 6. The relabel copies whole rows (streaming, not scattering), so it splits cleanly into per-thread blocks of new ids; the BFS only needs the forward graph, so it runs while the reverse graph is built.
 7. Atomic degree counts and an atomic cursor per row let every core build the CSRs, but locally it was no faster and the code was longer, so it was reverted (no evidence, no complexity).
 8. Dense distance arrays cost 2 x 14 MB per thread (336 MB at 12 threads), more than the graph itself, while one search touches about 10^4 nodes. A linear-probing map sized to the search took local M from 415 to 297 MB for about 15% more time. With the scoring weights (time ^0.5, memory ^0.2) and 12 threads on the box, that is a net gain of roughly 1.5 to 2 points.
+9. One (key, distance) array instead of two parallel arrays, hoping for one cache line per probe. No measurable change, so the simpler layout stayed.
+10. With BFS ids, the low bits put the runs of nearby ids from different BFS rings into the same slots, and linear probing then walks long clusters. A multiplicative hash spreads them; the query phase dropped about 25%.
+11. A node that has not improved needs no meeting check: whichever side labelled it last already compared against the other side's label. Nodes at or beyond the best meeting distance can never be on a shorter path, so they are not pushed.
+12. The board's box runs serial code slower than this Mac (board 0.507 s vs 0.35 s locally), so the single-threaded BFS (~70 ms locally) was the biggest serial step. Each thread now grows its own BFS region from its own root and claims nodes with an atomic swap; regions are laid out one after another, and unreached nodes (islands, no-in nodes) go last. Locality is as good inside a region, and the step runs on every core.
+13. Each thread scanned all edges and handled only rows in its id range, so writes stayed cache-local without atomics. Every thread reads all 60 MB of parsed edges, and with the reverse build running at the same time it was not faster locally.
+14. Dijkstra keys only grow, so a radix heap needs no comparisons between entries: each entry sits in the bucket of the highest bit where it differs from the last popped key and moves down at most 64 times.

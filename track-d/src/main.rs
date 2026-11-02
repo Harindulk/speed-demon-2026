@@ -3,11 +3,9 @@
 //! Parse the edge list in parallel into forward and reverse CSRs, then answer
 //! queries on every core with a bidirectional Dijkstra.
 
-use std::cmp::Reverse;
-use std::collections::BinaryHeap;
 use std::fs::File;
 use std::io::Write;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 
 mod mmap {
@@ -132,27 +130,48 @@ impl Csr {
 /// Breadth-first visiting order, so that nodes close in the graph get close
 /// ids. The input ids are a random shuffle, which makes every search step a
 /// cache miss; after relabelling a search touches a few compact id ranges.
-/// Returns (order, label): `order[k]` is the k-th node visited, `label` its inverse.
-fn bfs_labels(g: &Csr) -> (Vec<u32>, Vec<u32>) {
+/// Each thread grows its own BFS region from its own root, claiming nodes
+/// atomically, and the regions are laid out one after another.
+/// Returns (order, label): `order[k]` is the k-th node laid out, `label` its inverse.
+fn bfs_labels(g: &Csr, threads: usize) -> (Vec<u32>, Vec<u32>) {
     let n = g.first.len() - 1;
-    let mut label = vec![u32::MAX; n];
-    let mut order = Vec::with_capacity(n);
-    for root in 0..n as u32 {
-        if label[root as usize] != u32::MAX {
-            continue;
-        }
-        label[root as usize] = order.len() as u32;
-        order.push(root);
-        let mut head = order.len() - 1;
-        while head < order.len() {
-            for &(v, _) in g.neighbours(order[head]) {
-                if label[v as usize] == u32::MAX {
-                    label[v as usize] = order.len() as u32;
-                    order.push(v);
-                }
-            }
-            head += 1;
-        }
+    let claimed: Vec<AtomicBool> = (0..n).map(|_| AtomicBool::new(false)).collect();
+    // The plain load skips the costlier swap for the many already-claimed nodes.
+    let claim = |u: u32| {
+        let c = &claimed[u as usize];
+        !c.load(Ordering::Relaxed) && !c.swap(true, Ordering::Relaxed)
+    };
+    let regions: Vec<Vec<u32>> = thread::scope(|s| {
+        let handles: Vec<_> = (0..threads)
+            .map(|k| {
+                let claim = &claim;
+                s.spawn(move || {
+                    let root = (n * k / threads) as u32;
+                    let mut queue = Vec::new();
+                    if claim(root) {
+                        queue.push(root);
+                    }
+                    let mut head = 0;
+                    while head < queue.len() {
+                        for &(v, _) in g.neighbours(queue[head]) {
+                            if claim(v) {
+                                queue.push(v);
+                            }
+                        }
+                        head += 1;
+                    }
+                    queue
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let mut order = regions.concat();
+    // Nodes no region reached (islands, nodes with no in-edges) go last.
+    order.extend((0..n as u32).filter(|&u| claim(u)));
+    let mut label = vec![0u32; n];
+    for (k, &u) in order.iter().enumerate() {
+        label[u as usize] = k as u32;
     }
     (order, label)
 }
@@ -187,7 +206,7 @@ fn read_graph(b: &[u8], threads: usize) -> (Csr, Csr, Vec<u32>) {
     let (fwd, rev, (order, label)) = thread::scope(|s| {
         let reverse = s.spawn(|| Csr::build(n, &parsed, false));
         let fwd = Csr::build(n, &parsed, true);
-        let labels = bfs_labels(&fwd);
+        let labels = bfs_labels(&fwd, threads);
         (fwd, reverse.join().unwrap(), labels)
     });
     drop(parsed);
@@ -214,11 +233,11 @@ impl DistMap {
     }
 
     /// The slot holding u, or the empty slot where u would go (linear probing).
-    /// The low bits of the id are the hash: after BFS relabelling a search
-    /// touches runs of nearby ids, which then fill neighbouring slots.
+    /// A multiplicative hash, because the low id bits alone send the runs of
+    /// nearby BFS ids from different rings into the same slots.
     fn find(&self, u: u32) -> usize {
         let mask = self.keys.len() - 1;
-        let mut i = u as usize & mask;
+        let mut i = (u.wrapping_mul(0x9E37_79B9) >> 8) as usize & mask;
         while self.keys[i] != u && self.keys[i] != EMPTY {
             i = (i + 1) & mask;
         }
@@ -256,45 +275,111 @@ impl DistMap {
     }
 }
 
+/// Monotone priority queue for Dijkstra (a radix heap): keys pushed are never
+/// below the last key popped, so an entry only needs to sit in the bucket
+/// named by the highest bit where it differs from that key. Each entry moves
+/// down at most 64 times, and pops scan no comparisons in a binary tree.
+struct RadixHeap {
+    last: u64,
+    buckets: Vec<Vec<(u64, u32)>>, // bucket 0 holds keys equal to `last`
+    len: usize,
+}
+
+impl RadixHeap {
+    fn new() -> Self {
+        RadixHeap { last: 0, buckets: vec![Vec::new(); 65], len: 0 }
+    }
+
+    fn bucket(&self, key: u64) -> usize {
+        64 - (key ^ self.last).leading_zeros() as usize
+    }
+
+    fn push(&mut self, key: u64, node: u32) {
+        let b = self.bucket(key);
+        self.buckets[b].push((key, node));
+        self.len += 1;
+    }
+
+    /// Makes bucket 0 non-empty if the heap is: moves `last` up to the
+    /// smallest key of the first non-empty bucket and spreads that bucket out.
+    fn refill(&mut self) {
+        if !self.buckets[0].is_empty() {
+            return;
+        }
+        let Some(i) = self.buckets.iter().position(|b| !b.is_empty()) else { return };
+        let moving = std::mem::take(&mut self.buckets[i]);
+        self.last = moving.iter().map(|&(k, _)| k).min().unwrap();
+        for &(k, v) in &moving {
+            let b = self.bucket(k);
+            self.buckets[b].push((k, v));
+        }
+        self.buckets[i] = moving; // keep its allocation
+        self.buckets[i].clear();
+    }
+
+    fn peek(&mut self) -> Option<u64> {
+        self.refill();
+        self.buckets[0].last().map(|&(k, _)| k)
+    }
+
+    /// Pops a minimum entry; the heap must not be empty.
+    fn pop(&mut self) -> (u64, u32) {
+        self.refill();
+        self.len -= 1;
+        self.buckets[0].pop().unwrap()
+    }
+
+    fn clear(&mut self) {
+        self.buckets.iter_mut().for_each(Vec::clear);
+        self.last = 0;
+        self.len = 0;
+    }
+}
+
 /// One direction of a bidirectional search; state is reused across queries.
 struct Side {
     dist: DistMap,
-    heap: BinaryHeap<Reverse<(u64, u32)>>,
+    heap: RadixHeap,
 }
 
 impl Side {
     fn new() -> Self {
-        Side { dist: DistMap::new(1 << 16), heap: BinaryHeap::new() }
+        Side { dist: DistMap::new(1 << 16), heap: RadixHeap::new() }
     }
 
     fn reset(&mut self, start: u32) {
         self.dist.clear();
         self.heap.clear();
         *self.dist.entry(start) = 0;
-        self.heap.push(Reverse((0, start)));
+        self.heap.push(0, start);
     }
 
-    fn top(&self) -> Option<u64> {
-        self.heap.peek().map(|Reverse((d, _))| *d)
+    fn top(&mut self) -> Option<u64> {
+        self.heap.peek()
     }
 
     /// Settles one node and relaxes its edges; `best` becomes the shortest
-    /// s-t path seen through an edge whose far end the other side has labelled.
+    /// s-t path seen through a node both sides have labelled.
     fn step(&mut self, g: &Csr, other: &Side, best: &mut u64) {
-        let Reverse((d, u)) = self.heap.pop().unwrap();
+        let (d, u) = self.heap.pop();
         if d > self.dist.get(u) {
             return; // stale entry
         }
         for &(v, w) in g.neighbours(u) {
             let nd = d + w as u64;
             let known = self.dist.entry(v);
-            if nd < *known {
-                *known = nd;
-                self.heap.push(Reverse((nd, v)));
+            if nd >= *known {
+                continue;
             }
+            *known = nd;
+            // Checking meetings only on improvement is enough: whichever side
+            // labelled v last compared against the other side's label then.
             let far = other.dist.get(v);
             if far != u64::MAX {
                 *best = (*best).min(nd + far);
+            }
+            if nd < *best {
+                self.heap.push(nd, v); // a node at >= best cannot help
             }
         }
     }
@@ -318,7 +403,7 @@ fn shortest_path(fwd: &Csr, rev: &Csr, f: &mut Side, b: &mut Side, s: u32, t: u3
         if df + db >= best {
             break;
         }
-        if f.heap.len() <= b.heap.len() {
+        if f.heap.len <= b.heap.len {
             f.step(fwd, b, &mut best);
         } else {
             b.step(rev, f, &mut best);
