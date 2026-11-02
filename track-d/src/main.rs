@@ -71,25 +71,69 @@ struct Csr {
 }
 
 impl Csr {
-    /// Builds the out-edge CSR, or the in-edge CSR when `forward` is false.
-    fn build(n: usize, parsed: &[Vec<(u32, u32, u32)>], forward: bool) -> Csr {
-        let ends = |&(u, v, w): &(u32, u32, u32)| if forward { (u, v, w) } else { (v, u, w) };
+    /// Builds the CSR from edges already grouped by owner: `parts[p][t]` holds
+    /// the (tail, head, weight) edges that producer p saw with a tail in
+    /// owner t's rows `t * block..(t + 1) * block`. Each owner builds its rows
+    /// on its own thread from only its edges, so there are no atomics and its
+    /// random writes stay in a slice that fits in cache.
+    fn from_parts(n: usize, block: usize, parts: &[Vec<Vec<(u32, u32, u32)>>]) -> Csr {
+        let mine = |t: usize| parts.iter().flat_map(move |p| &p[t]);
         let mut first = vec![0u32; n + 1];
-        for e in parsed.iter().flatten() {
-            first[ends(e).0 as usize + 1] += 1;
-        }
+        thread::scope(|s| {
+            for (t, counts) in first[1..].chunks_mut(block).enumerate() {
+                s.spawn(move || {
+                    for &(u, _, _) in mine(t) {
+                        counts[u as usize - t * block] += 1;
+                    }
+                });
+            }
+        });
         for k in 0..n {
             first[k + 1] += first[k];
         }
-        let mut next = first.clone();
         let mut edges = vec![(0u32, 0u32); first[n] as usize];
-        for e in parsed.iter().flatten() {
-            let (a, b, w) = ends(e);
-            let slot = &mut next[a as usize];
-            edges[*slot as usize] = (b, w);
-            *slot += 1;
-        }
+        thread::scope(|s| {
+            let mut rest = &mut edges[..];
+            for (t, row_first) in first[..n].chunks(block).enumerate() {
+                let base = row_first[0];
+                let end = first[(t * block + row_first.len()) as usize];
+                let (slice, tail) = rest.split_at_mut((end - base) as usize);
+                rest = tail;
+                s.spawn(move || {
+                    let mut next: Vec<u32> = row_first.iter().map(|&f| f - base).collect();
+                    for &(u, v, w) in mine(t) {
+                        let slot = &mut next[u as usize - t * block];
+                        slice[*slot as usize] = (v, w);
+                        *slot += 1;
+                    }
+                });
+            }
+        });
         Csr { first, edges }
+    }
+
+    /// The reverse graph, built by the same owner scheme: each thread sorts
+    /// the in-edges of one block of rows into buckets by head owner.
+    fn transpose(&self, block: usize) -> Csr {
+        let n = self.first.len() - 1;
+        let owners = n.div_ceil(block);
+        let parts: Vec<Vec<Vec<(u32, u32, u32)>>> = thread::scope(|s| {
+            let handles: Vec<_> = (0..owners)
+                .map(|t| {
+                    s.spawn(move || {
+                        let mut buckets = vec![Vec::new(); owners];
+                        for u in t * block..n.min((t + 1) * block) {
+                            for &(v, w) in self.neighbours(u as u32) {
+                                buckets[v as usize / block].push((v, u as u32, w));
+                            }
+                        }
+                        buckets
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        Csr::from_parts(n, block, &parts)
     }
 
     /// The same graph with node u renamed to `label[u]`; `order` is the inverse
@@ -182,36 +226,35 @@ fn read_graph(b: &[u8], threads: usize) -> (Csr, Csr, Vec<u32>) {
     let mut i = 0;
     let n = number(b, &mut i) as usize;
     let m = number(b, &mut i) as usize;
-    let parsed: Vec<Vec<(u32, u32, u32)>> = thread::scope(|s| {
+    // Rows are owned in blocks, one per thread; each parse thread sorts the
+    // edges it reads into one bucket per owner as it goes.
+    let block = n.div_ceil(threads).max(1);
+    let owners = n.div_ceil(block);
+    let parts: Vec<Vec<Vec<(u32, u32, u32)>>> = thread::scope(|s| {
         let handles: Vec<_> = line_chunks(&b[i..], threads)
             .into_iter()
             .map(|chunk| {
                 s.spawn(move || {
-                    let mut out = Vec::with_capacity(chunk.len() / 16);
+                    let mut buckets = vec![Vec::with_capacity(chunk.len() / 16 / owners); owners];
                     let mut j = 0;
                     while j < chunk.len() {
                         let u = number(chunk, &mut j) as u32;
                         let v = number(chunk, &mut j) as u32;
                         let w = number(chunk, &mut j) as u32;
-                        out.push((u, v, w));
+                        buckets[u as usize / block].push((u, v, w));
                     }
-                    out
+                    buckets
                 })
             })
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
-    assert_eq!(parsed.iter().map(Vec::len).sum::<usize>(), m, "edge count");
-    // The BFS needs only the forward graph, so it overlaps the reverse build.
-    let (fwd, rev, (order, label)) = thread::scope(|s| {
-        let reverse = s.spawn(|| Csr::build(n, &parsed, false));
-        let fwd = Csr::build(n, &parsed, true);
-        let labels = bfs_labels(&fwd, threads);
-        (fwd, reverse.join().unwrap(), labels)
-    });
-    drop(parsed);
+    assert_eq!(parts.iter().flatten().map(Vec::len).sum::<usize>(), m, "edge count");
+    let fwd = Csr::from_parts(n, block, &parts);
+    drop(parts);
+    let (order, label) = bfs_labels(&fwd, threads);
     let fwd = fwd.relabel(&order, &label, threads);
-    let rev = rev.relabel(&order, &label, threads);
+    let rev = fwd.transpose(block);
     (fwd, rev, label)
 }
 

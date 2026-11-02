@@ -25,6 +25,8 @@ Local numbers come from an Apple M5 running the official harness in Colima (8 vC
 | 16 | Tried: `MAP_POPULATE` on the input mapping. Reverted | | parse 20-26 → 33-37 ms, total no better | | |
 | 17 | Tried: parallel degree gather in the relabel. Reverted | | relabel 38-45 vs 43-54 ms, no win under load | | |
 | 18 | Tried: no reverse CSR in input ids; reverse = transpose of the relabelled forward CSR. Reverted | | harness T 0.238 → 0.268 s, M 303 → 258 MB | | |
+| 19 | Owner-bucketed parallel CSR build: parse threads bucket edges by tail owner, each owner builds its rows; reverse CSR = bucketed transpose of the relabelled forward CSR | | forward build 65 → 23 ms; harness T 0.208 → 0.178 s, M 303 → 372 MB | | |
+| 20 | Owners write straight into one shared CSR (split slices) instead of per-owner blocks concatenated after | | harness T 0.208 → 0.173 s (best of 2x5 vs 2x5), M 303 → 326 MB | | |
 
 Why each step:
 
@@ -46,3 +48,5 @@ Why each step:
 16. Asking the kernel to map all 23k pages up front moved that work onto one thread inside `mmap`, where the parse threads had been taking the faults in parallel.
 17. Computing the new row lengths reads `first[]` at random, so it looked worth splitting across threads. No difference showed through the noise, so the shorter loop stayed.
 18. Building the reverse graph from the relabelled forward graph drops one 47 MB CSR and frees the parsed edges sooner (local M -15%), but the transpose lands on the critical path instead of overlapping the BFS (T +12%). Under the K formula (time ^0.5, memory ^0.2) that is a wash locally, and the box's slower serial speed tips it to a loss, so it was not kept.
+19. The input edges are shuffled, so no thread can own a range of tails without first grouping the edges. Each parse thread now drops each edge into one bucket per owner as it parses, and each owner counts and places only its own edges into rows that fit in its cache: no atomics, no thread reads edges it does not own (unlike steps 13 and 15). The forward build fell from 65 to 23 ms. The reverse graph is the same build fed from the relabelled forward graph, so the separate reverse build in input ids and its relabel are gone.
+20. Step 19 built each owner's rows into its own vectors and then copied them into one CSR, an extra 40 MB alive at the peak. Counting first and then splitting one shared edge array between the owners removes the copy: memory back down to +8% over step 14 for 17% less time, a net gain under the K formula (time ^0.5, memory ^0.2).
