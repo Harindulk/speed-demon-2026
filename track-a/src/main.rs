@@ -255,7 +255,10 @@ fn main() -> std::io::Result<()> {
             (*count, *at) = (*at as u32, *at + *count as usize);
         }
     }
-    let slots: Vec<AtomicU32> = (0..start[groups]).map(|_| AtomicU32::new(0)).collect();
+    let slots: Vec<AtomicU32> = vec![0u32; start[groups]]
+        .into_iter()
+        .map(AtomicU32::new)
+        .collect();
     thread::scope(|s| {
         for (c, mut cursor) in chunks.iter().zip(cursors) {
             let slots = &slots;

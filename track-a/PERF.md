@@ -13,6 +13,7 @@ Every step from the reference to your final version, each with the live-board ru
 | 6 | Percentiles: select p50 first, then p95 in the top half, then p99 in the top 5% | run-df1f0f914040 | 0.0618 | 53.1 | 68.8 |
 | 7 | Mark the hours seen while parsing instead of a serial pass over all 3.1M records | | | | |
 | 8 | Line cuts: reuse the SWAR scan to skip the method, one-line `mmap` call, simpler hash (288 to 274 counted lines) | | | | |
+| 9 | Latency array zeroed via calloc (`vec![0u32; n]` collected in place into atomics) | | | | |
 | - | Tried, reverted: count-then-rescan (two passes, no per-line records) | | | | |
 | - | Tried, reverted: `madvise(MADV_POPULATE_READ)` per thread chunk | | | | |
 | - | Tried, reverted: work-stealing parse over 8x more pieces than threads | | | | |
@@ -39,3 +40,5 @@ Local notes (Apple M5 under Colima, 8 vCPUs, shared with three other builds, so 
 - Reverted, `MADV_POPULATE_READ` per chunk: an attempt to fault the mapping in bulk on each thread. The A/B was 0.054 s (old) vs 0.063 s (new), slower.
 - Reverted, work stealing: 8x more pieces than threads, claimed from an atomic counter, so faster cores take more. The A/B was flat (0.082/0.079, 0.068/0.070 s). The box's 12 threads are 6 identical P-cores with hyperthreading, so there is no slow core to balance against. Not worth 8 more lines.
 - To reach the leader's 14 MB, the per-line latencies can't be stored at all. That needs a multi-pass histogram selection that rescans the page-cached input, which is a redesign and not a tweak.
+- Step 9: building 3.1M `AtomicU32`s one at a time zeroes and faults the 12.4 MB array serially before the scatter. Starting from `vec![0u32; n]` gives calloc'd pages, and the in-place collect into atomics reuses that allocation. The A/B over three rounds was 0.062/0.059, 0.062/0.061 and 0.063/0.062 s (old/new): small, but faster every time. Four seeds pass.
+- Why records stay 8 bytes: latency spans the full `u32` range (0 to 4294967295 per the spec), so a line needs 32 bits of latency plus hour, endpoint and the 5xx flag. One `u64` per line is already the minimum for a single pass.
