@@ -1,91 +1,41 @@
-# Speed Demon 2026 starter
+# StarFun: Speed Demon 2026
 
-A working entry for all four tracks of [Speed Demon 2026](https://speeddemon.dev). Each `track-*` folder holds the organisers' naive Python reference, packaged the way the live board builds and runs it. Use it to check your setup end to end, then replace the reference with your own code.
+Our entry for [Speed Demon 2026](https://speeddemon.dev), all four tracks. Each `track-*` folder is one standalone Rust program with no crates (D = 1 on every track), built offline on the allowlisted `rust:1-slim-trixie` image and copied into `debian:13-slim`.
 
-## Start in five steps
+| Track | Task | Idea in one line | Details |
+|---|---|---|---|
+| A | 3.1M log lines → hourly p50/p95/p99 | mmap, one chunk per thread, every line packed into one `u64`, counting-sort scatter, `select_nth_unstable` | [track-a](track-a/README.md) |
+| B | 250k docs, 50k boolean and phrase queries | index only the terms (and adjacent term pairs) the queries use, per-chunk sorted lists that turn into bitsets, no posting merge | [track-b](track-b/README.md) |
+| C | Hostile 202 MB CSV joined to regions | split on record starts without a quote pass, SWAR quote scan, dense region array, one bit per (country, name) | [track-c](track-c/README.md) |
+| D | 2,000 shortest paths on 1.74M nodes / 5M edges | owner-bucketed parallel CSR, BFS relabel for locality, size-balanced bidirectional Dijkstra with a radix heap | [track-d](track-d/README.md) |
 
-1. **Use this template** (the green button on GitHub) to create your repo. It can stay private until code freeze.
-2. **Install the [Speed Demon Board app](https://github.com/apps/speed-demon-board)** on that repo. It gets read-only access to the repos you pick and nothing else.
-3. **Register your team** on the [submission form](https://tally.so/r/Ar7g9z), with the repo URL and the tracks you are entering.
-4. **Push to the `speed-demon` branch.** It is this template's default branch, so a plain `git push` does it. The board picks up each push, builds every `track-*` folder and runs it once on the full public dataset. Results appear on speeddemon.dev.
-5. **Make it fast.** Log every step in the track's `PERF.md`, with the board run ID that measured it. At code freeze (November 2, 15:00 UTC), make the repo public.
+<!-- RESULTS -->
 
-One repo per team holds all your tracks. Delete the folders of the tracks you are not entering. An unchanged folder is the reference itself, so the board reports it as unchanged and does not run it.
+Three choices hold across all four tracks:
 
-## What is in a track folder
+- **Inputs are memory-mapped.** The box pre-warms `/data` into the page cache before the run starts, so mapped input costs no memory, while reading it into a buffer would cost its full size. The `mmap` call is declared with `extern "C"` and is the only `unsafe` block in each program.
+- **One thread per hardware thread, no locks in hot loops.** Work is split into ranges that threads own outright; results are merged once after `join`.
+- **Correct first.** Every change was checked against the reference's sha256 on four full-scale seeds (the board's seed 1 and seeds 2-4 made with the public generators) before it was pushed. `PERF.md` (root) lists every board run; each `track-*/PERF.md` lists every step, including the ones we reverted and why.
 
-| File | What it is |
-|---|---|
-| `Dockerfile` | Builds the folder offline, from an allowlisted image pinned by digest |
-| `.speed-demon.toml` | Track, team, language, dependency count; set `team` |
-| `PERF.md` | Your optimisation log, worth 8% of your total |
-| `README.md` | Your approach, your dependencies, your next 24 hours |
-| `run.py` + module | The reference; replace it with your code |
+## Reproduce
 
-## How your program runs
+```
+git clone https://github.com/hackathon-raptors/speed-demon-2026 _spec       # specs, generators, harness
+tools/gen.sh a 1                                                           # full-scale data for any track and seed
+tools/verify.sh a                                                          # build once, check every seed in tools/expected.txt
+```
+
+`check.py` is the organisers' single-run check: `python3 check.py a --data .data/a/full-seed1 --expected <sha256>`.
+
+## The rules each program runs under
 
 - It reads its inputs from `/data`, which is read-only, and writes exactly one file to `/out`, then exits 0. The file is `summary.txt` for A, `results.txt` for B, `aggregates.txt` for C and `distances.txt` for D.
 - `TRACK` is set to `a`, `b`, `c` or `d`.
-- There is no network, at build time or at run time. Commit your dependencies to the repo (`cargo vendor`, `go mod vendor` and so on).
+- There is no network, at build time or at run time (we have no dependencies to vendor).
 - It runs as an unprivileged user on a read-only filesystem. `/tmp` is 1 GB of scratch space.
 - It gets 12 hardware threads (six P-cores, turbo off), 8 GB of memory with no swap, and 512 processes.
 - The live board stops a run at 3x the reference's time. Final scoring stops it at 10x.
-- Your output must match the reference's byte for byte (sha256) on every run.
-
-## Check before you push
-
-`check.py` builds a track offline and runs it with the board's Docker settings, then prints the output's sha256 and a rough time. You need Docker and Python 3.
-
-```
-python3 check.py a --data data/a
-```
-
-To get data, generate it with the public generators. Seed 1 at `full` scale is the board's dataset; `sample` is 10% of it.
-
-```
-git clone https://github.com/hackathon-raptors/speed-demon-2026
-python3.13 speed-demon-2026/generators/a_ingest.py --seed 1 --scale sample --out data/a
-```
-
-No Python 3.13? Run the generator in the same image the reference uses:
-
-```
-docker run --rm -v "$PWD:/w" -w /w python:3.13-slim python3 speed-demon-2026/generators/a_ingest.py --seed 1 --scale sample --out data/a
-```
-
-Run the check once on the unchanged folder. The sha256 it prints is the correct answer for that data. After every change, pass it back, so the check fails on a wrong answer:
-
-```
-python3 check.py a --data data/a --expected <sha256>
-```
-
-The full datasets and their expected hashes are also published at kickoff, October 30, 15:00 UTC, linked from speeddemon.dev.
-
-On Colima, keep the repo and the data under your home folder, or Docker cannot mount them.
-
-## Your own language
-
-Replace the folder's contents with your code and a Dockerfile that builds it offline. A two-stage build keeps the image small. For Rust with no crates:
-
-```
-FROM rust:1-slim-trixie@sha256:1a939748a7cbab172de91a014e3804a97af1394a8c844faa67fce9401c4e40fb AS build
-WORKDIR /src
-COPY . .
-RUN cargo build --release --offline
-
-FROM debian:13-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
-COPY --from=build /src/target/release/solution /app/solution
-ENTRYPOINT ["/app/solution"]
-```
-
-Here `solution` is the package name in your `Cargo.toml`. Every allowlisted image and its digest is in [allowlist.json](https://speeddemon.dev/allowlist.json). Each direct runtime dependency costs a little, so count them in `.speed-demon.toml`.
-
-## What the board refuses before it builds
-
-- A `FROM` that is not in the allowlist, or not pinned by digest.
-- `ADD` of a URL or a git repo, and `COPY --from` an image (an earlier stage is fine).
-- A `# syntax=` line; cache, secret or ssh mounts; `RUN --network`, `--security` or `--device`; `ONBUILD`.
-- A build over 10 minutes, or an image over 2 GB.
+- The output must match the reference's byte for byte (sha256) on every run.
 
 ## Scoring, briefly
 
@@ -93,4 +43,4 @@ Faster than the reference earns points. Using less memory helps, up to a cap. Co
 
 ## Licence
 
-The reference code is copyright Hackathon Raptors CIC, under the MIT licence in `LICENSE`. Your repo has to be public under an OSI-approved licence at code freeze; keeping MIT is the simplest way.
+MIT, see `LICENSE`. The starter and reference code it grew from are copyright Hackathon Raptors CIC under the same licence.
