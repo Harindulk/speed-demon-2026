@@ -24,3 +24,10 @@ Why each step:
 6. Region loading runs before any thread starts, so its time adds straight to the total.
 
 Tried and dropped: `MAP_POPULATE` on the records mapping. Locally it was slower (the kernel faults pages in one thread before the parse starts, through the VM's virtiofs), and the box result is unknown.
+
+After the first commit:
+
+| Step | Change | Run ID | T (s) | M (MB) | Kept? |
+|---|---|---|---|---|---|
+| 7 | Measured memory instead of guessing: the cgroup peak minus mapped input minus the idle shell's peak leaves ~4.5 MB for `/solution` (3 runs: 4.40, 4.46, 4.57 MB) | | | local ~4.5 | no code change; already under the 7.3 MB cap, so memory work stops here |
+| 8 | Test the bitset word with a plain load and skip `fetch_or` when the bit is already set | | best of 30: 0.068 → 0.070 | | reverted: no measurable gain (only ~7% of marks are repeats) and two more lines |

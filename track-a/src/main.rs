@@ -57,6 +57,21 @@ fn two_digits(b: &[u8]) -> usize {
     ((b[0] - b'0') * 10 + (b[1] - b'0')) as usize
 }
 
+/// Index of the first space at or after `from`, eight bytes at a time (SWAR): XOR with
+/// spaces turns each space into a zero byte, and the classic has-zero-byte test finds it.
+fn find_space(data: &[u8], mut from: usize) -> usize {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    while let Some(word) = data.get(from..from + 8) {
+        let x = u64::from_le_bytes(word.try_into().unwrap()) ^ (ONES * b' ' as u64);
+        let zeros = x.wrapping_sub(ONES) & !x & (ONES << 7);
+        if zeros != 0 {
+            return from + (zeros.trailing_zeros() / 8) as usize;
+        }
+        from += 8;
+    }
+    from + data[from..].iter().position(|&b| b == b' ').unwrap()
+}
+
 fn parse_chunk(data: &[u8]) -> Chunk<'_> {
     let mut ids: HashMap<&[u8], usize, BuildHasherDefault<FastHash>> = HashMap::default();
     let mut chunk = Chunk { endpoints: Vec::new(), records: Vec::with_capacity(data.len() / 70) };
@@ -70,10 +85,7 @@ fn parse_chunk(data: &[u8]) -> Chunk<'_> {
             start += 1;
         }
         start += 1;
-        let mut end = start + 1;
-        while data[end] != b' ' {
-            end += 1;
-        }
+        let end = find_space(data, start + 1);
         let endpoint = &data[start..end];
         let error = data[end + 1] == b'5';
         let mut latency = 0u32;
@@ -148,10 +160,16 @@ fn push_num(out: &mut Vec<u8>, mut n: u64) {
     out.extend_from_slice(&buf[i..]);
 }
 
-/// Nearest rank: the value at 1-indexed rank ceil(p * n / 100).
-fn percentile(values: &mut [u32], p: usize) -> u32 {
-    let rank = (p * values.len() + 99) / 100;
-    *values.select_nth_unstable(rank - 1).1
+/// Nearest-rank p50, p95 and p99: the values at 1-indexed rank ceil(p * n / 100).
+/// Selecting p50 first leaves everything above it at the back, so p95 only searches
+/// the top half and p99 only the top 5%.
+fn percentiles(values: &mut [u32]) -> [u32; 3] {
+    let rank = |p: usize| (p * values.len() + 99) / 100 - 1;
+    let (r50, r95, r99) = (rank(50), rank(95), rank(99));
+    let p50 = *values.select_nth_unstable(r50).1;
+    let p95 = *values[r50..].select_nth_unstable(r95 - r50).1;
+    let p99 = *values[r95..].select_nth_unstable(r99 - r95).1;
+    [p50, p95, p99]
 }
 
 fn main() -> std::io::Result<()> {
@@ -279,9 +297,8 @@ fn main() -> std::io::Result<()> {
                     out.extend_from_slice(names[g % names.len()]);
                     let count = values.len() as u64;
                     let errs = errors[g].load(Relaxed) as u64;
-                    for n in [count, percentile(values, 50) as u64, percentile(values, 95) as u64]
-                        .into_iter()
-                        .chain([percentile(values, 99) as u64, errs, errs * 1_000_000 / count])
+                    let [p50, p95, p99] = percentiles(values).map(u64::from);
+                    for n in [count, p50, p95, p99, errs, errs * 1_000_000 / count]
                     {
                         out.push(b' ');
                         push_num(&mut out, n);
