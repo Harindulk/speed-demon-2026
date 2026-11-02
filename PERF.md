@@ -16,6 +16,10 @@ Every push to `speed-demon` is measured once by the live board. Per-step detail 
 | bc14fde | A | run-08e2d5bb50f8 | 0.0616 | 52.9 | 297 | 68.8 | Unchanged: re-run shows board noise under 1% on T |
 | bc14fde | C | run-716b1ac5363a | 0.0677 | 24.4 | 309 | 66.6 | Unchanged: M moved 20.1 → 24.4 MB between identical runs, so M differences under ~5 MB are noise |
 | bc14fde | D | run-dba010fa61f0 | 0.5297 | 205.8 | 332 | 53.2 | Unchanged: T within 5% of the previous run |
+| 5d4ccc6 | A | run-addbbb812832 | 0.0760 | 53.9 | 281 | 66.6 | Seen-hours flag moved into the parse, line cuts: 23% slower on the box (shared-cache-line writes from 12 threads, invisible locally); fix follows |
+| 5d4ccc6 | C | run-73ce90a4f176 | 0.0674 | 28.6 | 312 | 65.9 | 256 KB worker stacks: no effect, M is noisy (20-29 MB on identical code), reverted in 2b636c9 |
+| 5d4ccc6 | B | run-6f6434c2ca40 | 0.7095 | 112.7 | 448 | 55.2 | Unchanged |
+| 5d4ccc6 | D | run-4c67f524c848 | 0.5171 | 205.2 | 332 | 53.4 | Unchanged |
 
 Lesson from the first runs: local best-of-N times in Colima were close for A and C (0.08 and 0.07 s) but D ran 1.5x slower on the board (0.35 s local, 0.51 s board), and local memory, measured as container peak minus mapped input, missed 15-50 MB of heap the board counts. The leaders are at 0.014 s (A, C) and 0.072 s (D), so the gap is real, not a measuring error. From here every decision uses board numbers.
 
