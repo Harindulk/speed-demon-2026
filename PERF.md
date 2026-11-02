@@ -12,6 +12,10 @@ Every push to `speed-demon` is measured once by the live board. Per-step detail 
 | 3ce2b62 | C | run-d53c8620b124 | 0.0681 | 20.1 | 309 | 67.3 | First Rust version: mmap, quote-aware parallel split, dense regions, name bitsets |
 | 3ce2b62 | D | run-825573299ad2 | 0.5065 | 204.6 | 332 | 53.7 | First Rust version: CSR, BFS relabel, size-balanced bidirectional Dijkstra |
 | 3ce2b62 | B | run-802df1e33e90 | | | | | Not run: folder still held the reference (the board skips it) |
+| bc14fde | B | run-9a95e9f79a61 | 0.6952 | 114.4 | 448 | 55.4 | First Rust version: query-term-only postings, per-chunk hybrid bitsets, parallel queries |
+| bc14fde | A | run-08e2d5bb50f8 | 0.0616 | 52.9 | 297 | 68.8 | Unchanged: re-run shows board noise under 1% on T |
+| bc14fde | C | run-716b1ac5363a | 0.0677 | 24.4 | 309 | 66.6 | Unchanged: M moved 20.1 → 24.4 MB between identical runs, so M differences under ~5 MB are noise |
+| bc14fde | D | run-dba010fa61f0 | 0.5297 | 205.8 | 332 | 53.2 | Unchanged: T within 5% of the previous run |
 
 Lesson from the first runs: local best-of-N times in Colima were close for A and C (0.08 and 0.07 s) but D ran 1.5x slower on the board (0.35 s local, 0.51 s board), and local memory, measured as container peak minus mapped input, missed 15-50 MB of heap the board counts. The leaders are at 0.014 s (A, C) and 0.072 s (D), so the gap is real, not a measuring error. From here every decision uses board numbers.
 
