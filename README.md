@@ -16,7 +16,7 @@ Live-board best per track (seed 1, scoring box). Final scores come from a holdou
 | Track | T (s) | M (MB) | Lines | Points | vs reference |
 |---|---|---|---|---|---|
 | A | 0.059 | 60 | 284 | 68.9 | 545x faster |
-| B | 0.695 | 114 | 448 | 55.4 | 81x faster |
+| B | 0.593 | 134 | 519 | 55.9 | 95x faster |
 | C | 0.062 | 18 | 317 | 68.8 | 234x faster |
 | D | 0.269 | 174 | 449 | 60.2 | 270x faster |
 
