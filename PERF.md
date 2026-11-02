@@ -20,6 +20,10 @@ Every push to `speed-demon` is measured once by the live board. Per-step detail 
 | 5d4ccc6 | C | run-73ce90a4f176 | 0.0674 | 28.6 | 312 | 65.9 | 256 KB worker stacks: no effect, M is noisy (20-29 MB on identical code), reverted in 2b636c9 |
 | 5d4ccc6 | B | run-6f6434c2ca40 | 0.7095 | 112.7 | 448 | 55.2 | Unchanged |
 | 5d4ccc6 | D | run-4c67f524c848 | 0.5171 | 205.2 | 332 | 53.4 | Unchanged |
+| fc1e03f | A | run-fe1b1d19685e | 0.0588 | 60.3 | 284 | 68.9 | calloc latency array, still with steps 7-8: fastest A so far, so 5d4ccc6's 0.076 s was board noise, not steps 7-8 |
+| fc1e03f | B | run-86258154b497 | 0.6295 | 133.8 | 519 | 55.3 | Phrase-pair index, growable term table: 10% faster, but +71 lines and +20 MB cancel it in K |
+| fc1e03f | C | run-e5f0de48672e | 0.0836 | 22.1 | 320 | 64.6 | Name lookups batched 32 at a time: 24% slower, reverted |
+| fc1e03f | D | run-23a4b3d65854 | 0.4046 | 210.5 | 402 | 55.4 | Multiplicative hash, parallel multi-root BFS relabel, radix heap: 20% faster, +2 points |
 
 Lesson from the first runs: local best-of-N times in Colima were close for A and C (0.08 and 0.07 s) but D ran 1.5x slower on the board (0.35 s local, 0.51 s board), and local memory, measured as container peak minus mapped input, missed 15-50 MB of heap the board counts. The leaders are at 0.014 s (A, C) and 0.072 s (D), so the gap is real, not a measuring error. From here every decision uses board numbers.
 
