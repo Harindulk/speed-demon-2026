@@ -38,10 +38,12 @@ impl Hasher for FastHash {
             u64::from_le_bytes(w)
         };
         let n = bytes.len();
-        for w in [
-            word(&bytes[..n.min(8)]),
-            word(&bytes[n.saturating_sub(8)..]),
-        ] {
+        let (head, tail) = if n >= 8 {
+            (word(&bytes[..8]), word(&bytes[n - 8..]))
+        } else {
+            (word(bytes), 0)
+        };
+        for w in [head, tail] {
             self.0 = (self.0 ^ w).wrapping_mul(0x9e3779b97f4a7c15);
         }
     }
@@ -53,7 +55,6 @@ impl Hasher for FastHash {
 struct Chunk<'a> {
     endpoints: Vec<&'a [u8]>,
     records: Vec<u64>,
-    seen_hours: Vec<bool>,
 }
 
 fn two_digits(b: &[u8]) -> usize {
@@ -80,7 +81,6 @@ fn parse_chunk(data: &[u8]) -> Chunk<'_> {
     let mut chunk = Chunk {
         endpoints: Vec::new(),
         records: Vec::with_capacity(data.len() / 70),
-        seen_hours: vec![false; HOUR_KEYS],
     };
     let mut pos = 0;
     while pos < data.len() {
@@ -104,7 +104,6 @@ fn parse_chunk(data: &[u8]) -> Chunk<'_> {
             chunk.endpoints.push(endpoint);
             next_id
         });
-        chunk.seen_hours[hour] = true;
         chunk.records.push(pack(hour, error, id, latency));
     }
     chunk
@@ -200,9 +199,14 @@ fn main() -> std::io::Result<()> {
     names.sort_unstable();
     names.dedup();
     let mut hour_rank = vec![u32::MAX; HOUR_KEYS];
+    for c in &chunks {
+        for r in &c.records {
+            hour_rank[(r >> 50) as usize] = 0;
+        }
+    }
     let mut hours = Vec::new();
     for (key, rank) in hour_rank.iter_mut().enumerate() {
-        if chunks.iter().any(|c| c.seen_hours[key]) {
+        if *rank == 0 {
             *rank = hours.len() as u32;
             hours.push(key);
         }
