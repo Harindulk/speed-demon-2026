@@ -9,7 +9,19 @@ Our entry for [Speed Demon 2026](https://speeddemon.dev), all four tracks. Each 
 | C | Hostile 202 MB CSV joined to regions | split on record starts without a quote pass, SWAR quote scan, dense region array, one bit per (country, name) | [track-c](track-c/README.md) |
 | D | 2,000 shortest paths on 1.74M nodes / 5M edges | owner-bucketed parallel CSR, BFS relabel for locality, size-balanced bidirectional Dijkstra with a radix heap | [track-d](track-d/README.md) |
 
-<!-- RESULTS -->
+## Board at code freeze
+
+Live-board best per track (seed 1, scoring box). Final scores come from a holdout seed on 13 November.
+
+| Track | T (s) | M (MB) | Lines | Points | vs reference |
+|---|---|---|---|---|---|
+| A | 0.059 | 60 | 284 | 68.9 | 545x faster |
+| B | 0.695 | 114 | 448 | 55.4 | 81x faster |
+| C | 0.062 | 18 | 317 | 68.8 | 234x faster |
+| D | 0.269 | 174 | 449 | 60.2 | 270x faster |
+
+Run IDs and every intermediate step: [PERF.md](PERF.md).
+
 
 Three choices hold across all four tracks:
 

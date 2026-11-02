@@ -28,6 +28,24 @@ Every push to `speed-demon` is measured once by the live board. Per-step detail 
 | f885f9b | B | run-0f71a590def1 | 0.6845 | 133.3 | 519 | 54.4 | Unchanged code: 0.630 → 0.685 s between identical runs, B's board noise is ~8% |
 | f885f9b | C | run-115fa9606cd3 | 0.0617 | 18.1 | 317 | 68.8 | Still the batched-lookup code: 0.084 then 0.062 s on identical builds; the three unbatched runs (0.067-0.068) are the steadier choice, revert stands |
 | f885f9b | D | run-c0e7c2523de5 | 0.2767 | 244.8 | 441 | 58.5 | Owner-bucketed parallel CSR build and bucketed reverse transpose: 0.405 → 0.277 s, +3.2 points, the biggest single step of the day |
+| dbff237 | A | run-6465cef9f442 | 0.0631 | 61.2 | 288 | 68.0 | Unchanged code: 0.059 → 0.063 s on identical builds, A's board noise is ~7% |
+| dbff237 | B | run-15d9f1cc2d14 | 0.6498 | 133.0 | 519 | 55.0 | Unchanged code: 0.630, 0.685, 0.650 s across three identical runs |
+| dbff237 | C | run-6c63bcf3ed77 | 0.0680 | 22.3 | 309 | 66.9 | Unbatched lookups restored: 0.068 s, inside the 0.067-0.068 band of the earlier unbatched runs |
+| dbff237 | D | run-8334de25364f | 0.2694 | 173.7 | 449 | 60.2 | Old CSR freed before the transpose, exact-size transpose buckets: M 244.8 → 173.7 MB, T flat, +1.7 points, best D |
+| bd92f70 | A | | | | 299 | | SWAR latency parse and open-addressing intern table (final code commit, 14:38 UTC); run pending at freeze |
+
+## Final board (code freeze, 2 November 15:00 UTC)
+
+Best scored run per track on the live board at the freeze. Final scoring reruns the frozen code on a holdout seed, so these are the board's numbers, not the final ones.
+
+| Track | Commit | Run ID | T (s) | M (MB) | S | Points |
+|---|---|---|---|---|---|---|
+| A | fc1e03f | run-fe1b1d19685e | 0.0588 | 60.3 | 284 | 68.9 |
+| B | bc14fde | run-9a95e9f79a61 | 0.6952 | 114.4 | 448 | 55.4 |
+| C | f885f9b | run-115fa9606cd3 | 0.0617 | 18.1 | 317 | 68.8 |
+| D | dbff237 | run-8334de25364f | 0.2694 | 173.7 | 449 | 60.2 |
+
+Frozen HEAD is bd92f70 (Track A SWAR parse and intern table, verified on four seeds locally; B, C and D unchanged since dbff237). Best three (A, C, D) give a geometric mean of about 65.8 points on the machine part.
 
 Lesson from the first runs: local best-of-N times in Colima were close for A and C (0.08 and 0.07 s) but D ran 1.5x slower on the board (0.35 s local, 0.51 s board), and local memory, measured as container peak minus mapped input, missed 15-50 MB of heap the board counts. The leaders are at 0.014 s (A, C) and 0.072 s (D), so the gap is real, not a measuring error. From here every decision uses board numbers.
 
