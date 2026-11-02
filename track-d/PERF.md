@@ -25,8 +25,8 @@ Local numbers come from an Apple M5 running the official harness in Colima (8 vC
 | 16 | Tried: `MAP_POPULATE` on the input mapping. Reverted | | parse 20-26 → 33-37 ms, total no better | | |
 | 17 | Tried: parallel degree gather in the relabel. Reverted | | relabel 38-45 vs 43-54 ms, no win under load | | |
 | 18 | Tried: no reverse CSR in input ids; reverse = transpose of the relabelled forward CSR. Reverted | | harness T 0.238 → 0.268 s, M 303 → 258 MB | | |
-| 19 | Owner-bucketed parallel CSR build: parse threads bucket edges by tail owner, each owner builds its rows; reverse CSR = bucketed transpose of the relabelled forward CSR | | forward build 65 → 23 ms; harness T 0.208 → 0.178 s, M 303 → 372 MB | | |
-| 20 | Owners write straight into one shared CSR (split slices) instead of per-owner blocks concatenated after | | harness T 0.208 → 0.173 s (best of 2x5 vs 2x5), M 303 → 326 MB | | |
+| 19 | Owner-bucketed parallel CSR build: parse threads bucket edges by tail owner, each owner builds its rows; reverse CSR = bucketed transpose of the relabelled forward CSR | run-c0e7c2523de5 | forward build 65 → 23 ms; harness T 0.208 → 0.178 s, M 303 → 372 MB | | |
+| 20 | Owners write straight into one shared CSR (split slices) instead of per-owner blocks concatenated after | run-c0e7c2523de5 | harness T 0.208 → 0.173 s (best of 2x5 vs 2x5), M 303 → 326 MB | | |
 | 21 | Tried: SWAR parse of up to 7 digits per 8-byte word. Reverted | | parse 23-28 ms either way | | |
 | 22 | Tried: parallel inversion of the BFS order into labels. Reverted | | BFS 23-26 → 19-22 ms, total best 166 vs 178 ms, not a clear win | | |
 | 23 | Tried: dense per-thread distance arrays again, now with the radix heap. Reverted | | queries 75-87 vs 76-90 ms, no faster | | |
@@ -56,3 +56,4 @@ Why each step:
 21. Parsing 92 MB took 23-28 ms on 8 threads, so the per-byte digit loop looked like the limit. A SWAR version (find the separator with one mask, combine digit pairs, quads and halves with three multiplies) passed every seed but did not change the parse time. The phase is bound by page faults and bucket writes, not digit conversion, so the simple loop stayed.
 22. Writing `label[order[k]] = k` is 1.7M random writes on one thread. Splitting it across threads with atomic stores saved about 3 ms of BFS time, too small to show in the total, so it was not worth 12 more lines.
 23. A check that the hash map from step 8 is not costing time now that the heap is faster: dense arrays with a touched-list reset gave the same query time, so the map keeps its ~170 MB memory saving at no time cost.
+| 21b | Board check of steps 19-20: run-c0e7c2523de5 at f885f9b, 0.2767 s / 244.8 MB / S 441 / 58.5 pts, against 0.4046 s / 210.5 MB / 55.4 pts for fc1e03f | run-c0e7c2523de5 | 0.2767 | 244.8 | kept: 32% faster on the box for +34 MB and +39 lines, +3.2 points |

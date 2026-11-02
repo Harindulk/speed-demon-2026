@@ -24,6 +24,10 @@ Every push to `speed-demon` is measured once by the live board. Per-step detail 
 | fc1e03f | B | run-86258154b497 | 0.6295 | 133.8 | 519 | 55.3 | Phrase-pair index, growable term table: 10% faster, but +71 lines and +20 MB cancel it in K |
 | fc1e03f | C | run-e5f0de48672e | 0.0836 | 22.1 | 320 | 64.6 | Name lookups batched 32 at a time: 24% slower, reverted |
 | fc1e03f | D | run-23a4b3d65854 | 0.4046 | 210.5 | 402 | 55.4 | Multiplicative hash, parallel multi-root BFS relabel, radix heap: 20% faster, +2 points |
+| f885f9b | A | run-32c6cb071a4e | 0.0590 | 64.5 | 288 | 68.5 | Undo the in-parse hour flag and slice hash: same T as fc1e03f, so those two were never the problem; 5d4ccc6's 0.076 s was a noisy run |
+| f885f9b | B | run-0f71a590def1 | 0.6845 | 133.3 | 519 | 54.4 | Unchanged code: 0.630 → 0.685 s between identical runs, B's board noise is ~8% |
+| f885f9b | C | run-115fa9606cd3 | 0.0617 | 18.1 | 317 | 68.8 | Still the batched-lookup code: 0.084 then 0.062 s on identical builds; the three unbatched runs (0.067-0.068) are the steadier choice, revert stands |
+| f885f9b | D | run-c0e7c2523de5 | 0.2767 | 244.8 | 441 | 58.5 | Owner-bucketed parallel CSR build and bucketed reverse transpose: 0.405 → 0.277 s, +3.2 points, the biggest single step of the day |
 
 Lesson from the first runs: local best-of-N times in Colima were close for A and C (0.08 and 0.07 s) but D ran 1.5x slower on the board (0.35 s local, 0.51 s board), and local memory, measured as container peak minus mapped input, missed 15-50 MB of heap the board counts. The leaders are at 0.014 s (A, C) and 0.072 s (D), so the gap is real, not a measuring error. From here every decision uses board numbers.
 
