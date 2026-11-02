@@ -20,10 +20,13 @@ Local numbers: Apple M5 (arm64), Colima 8 vCPUs, seed 1 full. "check.py" is wall
 | 11 | Term table grows on demand instead of an 8 MB table then a rebuild; `exit(0)` after the write skips freeing ~1M lists | | setup 17 vs 19 ms, tail 9 vs 20 ms | | |
 | 12 | Per-byte hash rotate-xor instead of FNV multiply | | reverted: tie, best of 11 runs 382 vs 381 ms | | |
 | 13 | Phrase pairs indexed like terms; candidates hold every adjacent pair; 2-term phrases need no text check | | query phase ~70 ms vs ~200 ms; total best 465 vs 499 ms | local anon peak 106 | |
-| 14 | Per-term role bits skip the pair-table probe unless the pair could exist | | total best 452 vs 465 ms | 106 | |
+| 14 | Per-term role bits skip the pair-table probe unless the pair could exist (steps 11, 13, 14 committed together) | run-86258154b497 (9f336d1) | board 0.6295; local total best 452 vs 465 ms | board 133.8; local 106 | 55.3 |
 | 15 | 64 KB one-bit-per-hash filter in front of the term table | | reverted: best of 12 runs 381 vs 385 ms, within noise | | |
 | 16 | Token loop without the lowercase buffer, case-folded compare | | reverted: CPU best 2.70 vs 2.74 s, within noise | | |
 | 17 | Per-term storage only for terms that occur, one `u32` slot table | | reverted: CPU best 2.93 vs 2.73 s (one small allocation per term per chunk) | local anon peak 99 vs 107 | |
+| 18 | One `enum Postings { List, Bits }` array instead of lists + a bitset index | | reverted: best of 6 runs 356 vs 366 ms (-3%), 104 vs 107 MB, +10 lines | | |
+| 19 | Index one pair per phrase (the longest words) instead of every pair | | reverted: 1,059 vs 380 ms; one pair leaves too many candidates to re-check | local 92 vs 107 | |
+| 20 | One pass per line: the token scan ends at the LF instead of a separate newline search | | reverted: best of 7 runs 369 vs 368 ms | | |
 
 Why each step:
 
@@ -42,3 +45,5 @@ Why each step:
 13. A counter showed phrase verification re-tokenizing 214,226 candidate documents, 438 MB of text, 1.7x the corpus. Indexing the ~45k adjacent term pairs that phrases use costs one extra probe per token and removes almost all of that: a document with every pair of a phrase nearly always holds the phrase.
 14. Most adjacent token pairs cannot be a phrase pair, and a 76 KB role table rejects them before the hash probe.
 15-17. All measured on a VM that three other tracks were loading at the same time, by wall time and by `times` CPU totals; none beat the noise floor (~5%), so all three were reverted. Board vs local (0.695 s vs ~0.42 s) is about the clock ratio of the box's i5-13500 with turbo off to the M5, not a serial phase: setup is ~17 ms and the tail ~9 ms locally.
+Board, steps 11-14 together: T 0.695 -> 0.6295 s (-10%), but M 114.4 -> 133.8 MB and S 448 -> 519, so points stayed at 55.3-55.4. The pair postings cost memory, and the line count rose.
+18-20. Measured on an idle VM, best of 6-7 runs. Indexing breakdown (index phase, wall): tokenize ~95 ms, term lookup +40 ms, posting updates +85 ms, pair lookups and updates +80 ms; queries are now ~40 ms. None of the three changes cleared the 10% bar.
