@@ -20,7 +20,11 @@ Local numbers come from an Apple M5 running the official harness in Colima (8 vC
 | 11 | Check meetings only when a label improves; never push a node at >= best | | queries best-of-3 130 → 122 ms | | |
 | 12 | BFS relabelling from one root per thread (atomic claims), regions laid out in turn | | build+BFS ~140 → ~75 ms; total best 330 → 251 ms | | |
 | 13 | Tried: CSR build split by tail-id range across threads (no atomics). Reverted | | build+BFS 102-131 vs 133-247 ms, no win | | |
-| 14 | Radix heap instead of `BinaryHeap` | | queries best-of-6 115 → 79 ms; total 244 → 215 ms | | |
+| 14 | Radix heap instead of `BinaryHeap` (committed 9df7c6d with steps 10-12) | | queries best-of-6 115 → 79 ms; total 244 → 215 ms | | |
+| 15 | Tried: range-partitioned build for the forward CSR only, reverse build kept serial. Reverted | | build+BFS best 93 → 142 ms, slower | | |
+| 16 | Tried: `MAP_POPULATE` on the input mapping. Reverted | | parse 20-26 → 33-37 ms, total no better | | |
+| 17 | Tried: parallel degree gather in the relabel. Reverted | | relabel 38-45 vs 43-54 ms, no win under load | | |
+| 18 | Tried: no reverse CSR in input ids; reverse = transpose of the relabelled forward CSR. Reverted | | harness T 0.238 → 0.268 s, M 303 → 258 MB | | |
 
 Why each step:
 
@@ -38,3 +42,7 @@ Why each step:
 12. The board's box runs serial code slower than this Mac (board 0.507 s vs 0.35 s locally), so the single-threaded BFS (~70 ms locally) was the biggest serial step. Each thread now grows its own BFS region from its own root and claims nodes with an atomic swap; regions are laid out one after another, and unreached nodes (islands, no-in nodes) go last. Locality is as good inside a region, and the step runs on every core.
 13. Each thread scanned all edges and handled only rows in its id range, so writes stayed cache-local without atomics. Every thread reads all 60 MB of parsed edges, and with the reverse build running at the same time it was not faster locally.
 14. Dijkstra keys only grow, so a radix heap needs no comparisons between entries: each entry sits in the bucket of the highest bit where it differs from the last popped key and moves down at most 64 times.
+15. Same idea as 13 for the forward graph alone, so the BFS could start sooner. Every thread still reads all 60 MB of parsed edges, and it was slower.
+16. Asking the kernel to map all 23k pages up front moved that work onto one thread inside `mmap`, where the parse threads had been taking the faults in parallel.
+17. Computing the new row lengths reads `first[]` at random, so it looked worth splitting across threads. No difference showed through the noise, so the shorter loop stayed.
+18. Building the reverse graph from the relabelled forward graph drops one 47 MB CSR and frees the parsed edges sooner (local M -15%), but the transpose lands on the critical path instead of overlapping the BFS (T +12%). Under the K formula (time ^0.5, memory ^0.2) that is a wash locally, and the box's slower serial speed tips it to a loss, so it was not kept.
